@@ -251,7 +251,9 @@ class SpectralTransformerBranch(nn.Module):
             norm_first=True,
         )
         self.encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_layers
+            encoder_layer,
+            num_layers=num_layers,
+            enable_nested_tensor=False,
         )
 
         # ---- 输出层归一化 ----
@@ -498,7 +500,9 @@ class SpectralMAE(nn.Module):
             activation='gelu', batch_first=True, norm_first=True,
         )
         self.encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_encoder_layers
+            encoder_layer,
+            num_layers=num_encoder_layers,
+            enable_nested_tensor=False,
         )
         self.encoder_norm = nn.LayerNorm(embed_dim)
 
@@ -510,7 +514,11 @@ class SpectralMAE(nn.Module):
             dim_feedforward=ff_dim, dropout=dropout,
             activation='gelu', batch_first=True, norm_first=True,
         )
-        self.decoder = nn.TransformerEncoder(decoder_layer, num_layers=1)
+        self.decoder = nn.TransformerEncoder(
+            decoder_layer,
+            num_layers=1,
+            enable_nested_tensor=False,
+        )
         self.decoder_norm = nn.LayerNorm(embed_dim)
 
         # 投影到原始 patch 维度: embed_dim -> in_channels * patch_size
