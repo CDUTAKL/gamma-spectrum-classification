@@ -1,0 +1,74 @@
+{
+    "data": {
+        "train_dir": "E:/data/xunlian",
+        "val_dir": "E:/data/yanzheng",
+        "num_classes": 3,
+        "spectrum_length": 820,
+        "label_map": {
+            "标签一": 0,
+            "标签二": 1,
+            "标签三": 1,
+            "标签四": 0,
+            "标签五": 2
+        },
+        "class_names": ["粘土", "砂土", "粉土"],
+        "energy_windows": {
+            "K": [327, 396],
+            "U": [426, 496],
+            "Th": [682, 820]
+        }
+    },
+    "augmentation": {
+        "poisson_resample": true,
+        "channel_shift_max": 2,
+        "aug_prob": 0.5,
+        "gaussian_noise_std": 0.02,
+        "smooth_window": 11,
+        "mixup_alpha": 0.4
+    },
+    "model": {
+        "in_channels": 3,
+        "multi_scale_channels": [48, 96, 192],
+        "multi_scale_kernels": [5, 15, 31],
+        "pool_size": 4,
+        "se_reduction": 4,
+        "fc_dims": [128],
+        "dropouts": [0.3],
+        "window_feature_dim": 74,
+        "window_hidden_dim": 64,
+        "transformer": {
+            "patch_size": 10,
+            "embed_dim": 64,
+            "num_heads": 4,
+            "num_layers": 2,
+            "ff_dim": 128,
+            "dropout": 0.1
+        }
+    },
+    "training": {
+        "batch_size": 32,
+        "epochs": 150,
+        "learning_rate": 0.0005,
+        "weight_decay": 1e-4,
+        "loss_type": "focal",
+        "focal_gamma": 2.0,
+        "focal_alpha": [1.0, 0.5, 1.5],
+        "label_smoothing": 0.1,
+        "warmup_epochs": 10,
+        "early_stopping_patience": 30,
+        "n_splits": 5,
+        "lr_scheduler": "cosine",
+        "num_workers": 0,
+        "seed": 42,
+        "swa_start_epoch": 0.75,
+        "swa_lr": 1e-4,
+        "val_interval": 5,
+        "use_compile": true
+    },
+    "output": {
+        "checkpoint_dir": "experiments/checkpoints",
+        "log_dir": "experiments/logs",
+        "best_model_name": "best_model.pth",
+        "last_model_name": "last_model.pth"
+    }
+}
