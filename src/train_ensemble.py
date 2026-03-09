@@ -268,7 +268,7 @@ def train_cnn_model(config, train_ds, val_ds, device, logger, tag, seed):
 
     # AMP: 仅在 CUDA 设备上启用混合精度
     use_amp = device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
 
     patience = config["training"].get("early_stopping_patience", 30)
     stopper = EarlyStopping(patience) if patience > 0 else None

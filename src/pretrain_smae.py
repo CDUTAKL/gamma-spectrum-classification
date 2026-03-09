@@ -243,7 +243,7 @@ def main():
 
     # AMP 混合精度
     use_amp = device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
 
     # ---- 训练循环 ----
     logger.info(f"\n{'=' * 50}")
@@ -262,7 +262,7 @@ def main():
             batch = batch.to(device)
             optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp):
                 loss, _, _ = model(batch)
 
             if use_amp:

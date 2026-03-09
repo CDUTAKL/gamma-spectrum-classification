@@ -71,7 +71,7 @@ def train_one_epoch(
     epoch: int = 1,
     fold: int = 0,
     mixup_alpha: float = 0.0,
-    scaler: torch.cuda.amp.GradScaler = None,
+    scaler=None,
 ) -> dict:
     """训练一个 epoch。
 
@@ -95,7 +95,7 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         # AMP: autocast 块内的运算自动选择 FP16/FP32
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast("cuda", enabled=use_amp):
             # Mixup 数据增强
             if mixup_alpha > 0 and model.training:
                 lam = np.random.beta(mixup_alpha, mixup_alpha)
@@ -187,7 +187,7 @@ def train_single_fold(
 
     # AMP 混合精度: CUDA 设备上启用, 加速 15-25%
     use_amp = device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
 
     # SWA 配置
     swa_start_frac = config["training"].get("swa_start_epoch", 0)
