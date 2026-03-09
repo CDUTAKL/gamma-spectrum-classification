@@ -1,21 +1,28 @@
 # ========================
-# 1. 运行缓存与临时文件 (自动过滤，不上传)
+# 1. 运行缓存与临时文件
 # ========================
 __pycache__/
 *.pyc
 .tmp/
 CLS
 nul
+
 # ========================
-# 2. 训练数据与结果 (体积太大，不上传)
+# 2. 大体积数据与训练产物
 # ========================
 *.pth
 *.npz
 *.npy
-experiments/
 data/
+
+# experiments 下默认不提交，但保留 SMAE 预训练权重
+experiments/*
+!experiments/checkpoints/
+experiments/checkpoints/*
+!experiments/checkpoints/smae_pretrained.pth
+
 # ========================
-# 3. 编辑器与AI助手配置 (仅个人本地有用，不上传)
+# 3. 编辑器与本地助手配置
 # ========================
 .idea/
 .vscode/
