@@ -333,6 +333,22 @@ Windows 可选“自动弹出”(默认关闭)：
 - 云端镜像缺少 `xgboost` 时，会在导入阶段报错：
   - `pip install xgboost`
 
+### 8.4 版本管理(Git)建议
+
+为了避免“本地代码已改但忘记同步”“训练用的代码版本对不上”等问题，建议养成固定习惯：
+
+- 每次完成一项代码修改后，立刻提交一次 git commit（保持提交粒度小、信息明确）。
+- 在开始一次耗时训练前，确保工作区干净并已提交（这样日志对应的代码版本可追溯）。
+
+常用命令(项目根目录执行)：
+
+```bash
+git status
+git add -A
+git commit -m "描述你这次改动的要点"
+git push origin main
+```
+
 ---
 
 ## 九、如何运行(本地/云端)
@@ -415,4 +431,3 @@ tail -f train_output.log
 | 训练期评估/混淆矩阵 | [src/evaluate.py](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/evaluate.py) | 每 epoch 评估与混淆矩阵绘图 |
 | 训练结束可视化/清单导出 | [src/artifacts.py](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/artifacts.py) | 导出“预测成功/失败”清单与图表 |
 | 全局配置 | [configs/config.json](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/configs/config.json) | `window_feature_dim=86`、artifact_dir 等 |
-
