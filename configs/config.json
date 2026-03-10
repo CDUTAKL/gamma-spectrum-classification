@@ -65,6 +65,9 @@
         "val_interval": 5,
         "use_compile": true
     },
+    "stacking": {
+        "meta_features": "proba_only"
+    },
     "output": {
         "checkpoint_dir": "experiments/checkpoints",
         "log_dir": "experiments/logs",

@@ -418,6 +418,56 @@ def predict_cnn_tta(models, dataset, device,
     return probs, labels
 
 
+def _meta_uncertainty_features(probs: np.ndarray) -> np.ndarray:
+    """Uncertainty features from a (N, C) probability matrix.
+
+    Returns (N, 3): [max_prob, margin_top1_top2, entropy]
+    """
+    p = np.asarray(probs, dtype=np.float64)
+    if p.ndim != 2:
+        raise ValueError(f"probs must be 2D, got shape {p.shape}")
+    top1 = p.max(axis=1)
+    sort2 = np.sort(p, axis=1)
+    top2 = (
+        sort2[:, -2]
+        if sort2.shape[1] >= 2
+        else np.zeros(p.shape[0], dtype=np.float64)
+    )
+    margin = top1 - top2
+    entropy = -np.sum(p * np.log(p + 1e-12), axis=1)
+    return np.stack([top1, margin, entropy], axis=1).astype(np.float32)
+
+
+def build_meta_features(
+    oof_cnn: np.ndarray,
+    oof_gb: np.ndarray,
+    oof_xgb: np.ndarray,
+    measure_times: np.ndarray,
+    mode: str,
+) -> np.ndarray:
+    """Build meta features for stacking.
+
+    mode:
+      - "proba_only": concat [cnn, gb, xgb] -> (N, 9)
+      - "proba+uncertainty": add 3*3 uncertainty features -> (N, 18)
+      - "proba+uncertainty+time": add log(measure_time) -> (N, 19)
+    """
+    base = np.hstack([oof_cnn, oof_gb, oof_xgb]).astype(np.float32)
+    mode = (mode or "proba_only").strip().lower()
+    if mode == "proba_only":
+        return base
+
+    parts = [base]
+    if "uncertainty" in mode:
+        parts.append(_meta_uncertainty_features(oof_cnn))
+        parts.append(_meta_uncertainty_features(oof_gb))
+        parts.append(_meta_uncertainty_features(oof_xgb))
+    if mode.endswith("+time"):
+        mt = np.asarray(measure_times, dtype=np.float32)
+        parts.append(np.log(np.maximum(mt, 1e-6)).reshape(-1, 1))
+    return np.hstack(parts).astype(np.float32)
+
+
 def extract_ml_features(file_paths, measure_times,
                         energy_windows, spectrum_length,
                         feature_stats=None):
@@ -662,9 +712,18 @@ def main():
     logger.info("Phase 2: Stacking 元学习器")
     logger.info(f"{'=' * 60}")
 
-    # 构建元特征: 拼接三个基模型的概率预测
-    # (N, 3) + (N, 3) + (N, 3) = (N, 9)
-    meta_X = np.hstack([oof_cnn, oof_gb, oof_xgb])
+    # 构建元特征: 默认仅拼接三个基模型的概率预测 (N, 9)
+    # 可选增强: 追加每个基模型的不确定性特征(最大概率/边际/熵)，以及测量时长。
+    stack_cfg = config.get("stacking", {})
+    meta_mode = stack_cfg.get("meta_features", "proba_only")
+    meta_X = build_meta_features(
+        oof_cnn=oof_cnn,
+        oof_gb=oof_gb,
+        oof_xgb=oof_xgb,
+        measure_times=all_mts,
+        mode=str(meta_mode),
+    )
+    logger.info(f"  元特征模式: {meta_mode}")
     logger.info(f"  元特征维度: {meta_X.shape}")
 
     # 使用独立的 K-Fold 划分评估元学习器 (不同 random_state)

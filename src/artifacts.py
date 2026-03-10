@@ -14,6 +14,11 @@ def _ensure_dir(path: str) -> str:
     return path
 
 
+def _safe_prob_columns(n_classes: int) -> list[str]:
+    # Keep columns ASCII-only for easier downstream scripting.
+    return [f"prob_{i}" for i in range(int(n_classes))]
+
+
 def _maybe_open(path: str, enabled: bool) -> None:
     """在本机环境中尝试打开文件(如 PNG/CSV)。
 
@@ -206,14 +211,25 @@ def save_stacking_oof_artifacts(
             raise ValueError(
                 f"y_prob 维度不匹配, 期望 {(n, len(class_names))}, 实际 {y_prob.shape}"
             )
+
+        # Per-class probabilities for error analysis (e.g. 粉土 vs 粘土 margin).
+        prob_cols = _safe_prob_columns(len(class_names))
+        for i, col in enumerate(prob_cols):
+            df[col] = y_prob[:, i].astype(np.float32)
+
         top1 = y_prob.max(axis=1)
         sort2 = np.sort(y_prob, axis=1)
         top2 = sort2[:, -2] if sort2.shape[1] >= 2 else np.zeros(n, dtype=np.float64)
         margin = top1 - top2
         true_prob = y_prob[np.arange(n), y_true]
+        pred_prob = y_prob[np.arange(n), y_pred]
+        entropy = -np.sum(y_prob * np.log(y_prob + 1e-12), axis=1)
+
         df["prob_top1"] = top1
         df["prob_true"] = true_prob
+        df["prob_pred"] = pred_prob
         df["margin_top1_top2"] = margin
+        df["entropy"] = entropy.astype(np.float32)
 
     all_csv = os.path.join(artifact_dir, "stacking_oof_predictions.csv")
     df.to_csv(all_csv, index=False, encoding="utf-8-sig")
@@ -257,4 +273,3 @@ def save_stacking_oof_artifacts(
         "n_samples": n,
         "n_misclassified": int((y_true != y_pred).sum()),
     }
-
