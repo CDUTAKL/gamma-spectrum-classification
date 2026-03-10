@@ -426,7 +426,7 @@ def extract_ml_features(file_paths, measure_times,
         feature_stats:   训练集统计量；若包含 PCA 参数则追加 PCA 得分
 
     Returns:
-        (N, D) 特征矩阵，当前 D=74
+        (N, D) 特征矩阵，当前 D=86
     """
     X = []
     for fp, mt in zip(file_paths, measure_times):

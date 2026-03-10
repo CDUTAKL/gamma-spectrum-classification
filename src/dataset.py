@@ -115,6 +115,58 @@ def _find_peak_features(window_data: np.ndarray) -> tuple:
     return peak_height, peak_pos, fwhm
 
 
+def _extract_peak_local_contrast_features(window_data: np.ndarray) -> list:
+    """提取单个能窗内与峰相关的局部对比度特征（4维）。
+
+    设计目的：
+      - 峰高本身受测量强度影响大，引入“峰-背景”对比能更稳定地反映可分性
+      - 对粘土/粉土等峰形相近、噪声较强的边界样本更敏感
+
+    输出特征（按顺序）：
+      1) peak_ratio:   峰高/背景（背景用窗内中位数近似），反映信噪比趋势
+      2) peak_snr:     (峰高-背景)/噪声幅度（噪声用 MAD 估计），反映峰的显著性
+      3) peak_offset:  峰位置相对能窗中心的偏移量（[-0.5, 0.5]），反映峰“是否跑偏”
+      4) peak_focus:   峰附近局部能量占比，反映峰宽/能量集中程度
+    """
+    eps = 1e-10
+    n = int(len(window_data))
+    if n == 0:
+        return [0.0, 0.0, 0.0, 0.0]
+
+    peak_height = float(window_data.max())
+    if peak_height <= 0.0:
+        return [0.0, 0.0, 0.0, 0.0]
+
+    peak_idx = int(np.argmax(window_data))
+    peak_pos = float(peak_idx) / max(n - 1, 1)
+
+    # 背景与噪声估计：用中位数 + MAD（更稳健，避免少数尖峰拉高 std）
+    bg = float(np.median(window_data))
+    mad = float(np.median(np.abs(window_data - bg)))
+    noise = 1.4826 * mad
+    if noise < 1e-8:
+        noise = float(window_data.std())
+    if noise < 1e-8:
+        noise = 1.0
+
+    prominence = max(peak_height - bg, 0.0)
+    peak_ratio = (peak_height + eps) / (bg + eps)
+    peak_snr = prominence / (noise + eps)
+
+    # 峰偏移：相对窗中心（0.5）偏移，中心更稳定
+    peak_offset = peak_pos - 0.5
+
+    # 峰能量集中度：以窗口长度的 10% 为半径，统计峰附近能量占比
+    radius = max(2, n // 10)
+    lo = max(0, peak_idx - radius)
+    hi = min(n, peak_idx + radius + 1)
+    local_sum = float(window_data[lo:hi].sum())
+    total_sum = float(window_data.sum())
+    peak_focus = local_sum / (total_sum + eps)
+
+    return [float(peak_ratio), float(peak_snr), float(peak_offset), float(peak_focus)]
+
+
 def extract_wavelet_energy_features(
     cps_spectrum: np.ndarray,
     wavelet: str = WAVELET_NAME,
@@ -190,17 +242,18 @@ def transform_pca_scores(cps_spectrum: np.ndarray, pca_stats: dict) -> np.ndarra
 
 def extract_energy_window_features(cps_spectrum: np.ndarray, energy_windows: dict,
                                     measure_time: float = None) -> np.ndarray:
-    """从 CPS 谱提取 59 维通用工程特征（不含 PCA 得分）。
+    """从 CPS 谱提取 71 维通用工程特征（不含 PCA 得分）。
 
     特征分组:
       [0:10]   基础能窗特征: K/U/Th CPS, 总 CPS, 各窗口占比和比值
       [10:19]  峰值特征: 每个能窗的峰高/峰位/半高宽
-      [19:25]  全谱统计矩: 均值/标准差/偏度/峰度/最大值/非零占比
-      [25:26]  测量时间
-      [26:34]  物理判别特征: Th/K, Th/U, Compton, 低能区, 谱质心, 谱熵
-      [34:48]  领域增强特征 (新增): 三元坐标, 窗口偏度/峰度, 滚动波动率, Compton 斜率
-      [48:53]  对数比值特征: log-ratio 变换后的非线性判别关系
-      [53:59]  小波能量特征: 多尺度子带能量占比
+      [19:31]  峰局部对比度特征: 每个能窗 4 维（峰/背景、SNR、中心偏移、峰集中度）
+      [31:37]  全谱统计矩: 均值/标准差/偏度/峰度/最大值/非零占比
+      [37:38]  测量时间
+      [38:46]  物理判别特征: Th/K, Th/U, Compton, 低能区, 谱质心, 谱熵
+      [46:60]  领域增强特征 (新增): 三元坐标, 窗口偏度/峰度, 滚动波动率, Compton 斜率
+      [60:65]  对数比值特征: log-ratio 变换后的非线性判别关系
+      [65:71]  小波能量特征: 多尺度子带能量占比
     """
     k_range = energy_windows["K"]
     u_range = energy_windows["U"]
@@ -231,6 +284,10 @@ def extract_energy_window_features(cps_spectrum: np.ndarray, energy_windows: dic
     for window_data in [k_data, u_data, th_data]:
         ph, pp, fw = _find_peak_features(window_data)
         features.extend([ph, pp, fw])
+
+    # 峰局部对比度特征：每个能窗 4 维 → 12维
+    for window_data in [k_data, u_data, th_data]:
+        features.extend(_extract_peak_local_contrast_features(window_data))
 
     # 全谱统计矩特征 (6维)：均值、标准差、偏度、峰度、最大值、非零道占比
     spec = cps_spectrum[:820]
@@ -381,7 +438,7 @@ def extract_engineered_features(
         feature_stats: 训练集统计量；若包含 PCA 参数则追加 PCA 得分
 
     Returns:
-        不含 PCA 时返回 59 维，含 PCA 时返回 74 维
+        不含 PCA 时返回 71 维，含 PCA 时返回 86 维
     """
     base_features = extract_energy_window_features(
         cps_spectrum, energy_windows, measure_time
