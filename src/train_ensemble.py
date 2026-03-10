@@ -134,18 +134,13 @@ def parse_args():
 # =====================================================================
 
 def _config_hash(config: dict) -> str:
-    """计算配置关键字段的 MD5 指纹，用于验证 OOF 缓存与当前配置一致性。"""
-    key_fields = {
-        "num_classes": config["data"]["num_classes"],
-        "spectrum_length": config["data"]["spectrum_length"],
-        "energy_windows": config["data"]["energy_windows"],
-        "n_splits": config["training"].get("n_splits", 5),
-        "seed": config["training"]["seed"],
-        "epochs": config["training"]["epochs"],
-        "batch_size": config["training"]["batch_size"],
-    }
-    raw = json.dumps(key_fields, sort_keys=True)
-    return hashlib.md5(raw.encode()).hexdigest()[:12]
+    """计算配置的 MD5 指纹，用于验证 OOF 缓存与当前配置一致性。
+
+    注意：OOF 概率会受大量配置项影响（增强、模型结构、损失函数、cache 等）。
+    因此这里对完整 config 做 canonical JSON 后再 hash，避免误用旧 OOF 缓存。
+    """
+    raw = json.dumps(config, sort_keys=True, ensure_ascii=False)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
 
 
 def save_oof_cache(
@@ -225,7 +220,8 @@ def load_oof_cache(path: str, config: dict, logger) -> dict:
     if not os.path.exists(path):
         raise FileNotFoundError(f"OOF 缓存文件不存在: {path}")
 
-    data = np.load(path, allow_pickle=True)
+    # 不需要 pickle；禁用可避免读取被污染 npz 时触发反序列化风险。
+    data = np.load(path, allow_pickle=False)
     logger.info(f"加载 OOF 缓存: {os.path.abspath(path)}")
 
     # === 元数据验证 ===
