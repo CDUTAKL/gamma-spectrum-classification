@@ -563,6 +563,26 @@ class GammaSpectrumDataset(Dataset):
         else:
             self.stats = self._precompute_statistics()
 
+        # ---- 缓存初始化 ----
+        cache_cfg = config.get("cache", {})
+        self._cache_enabled = cache_cfg.get("enabled", False)
+        self._l0_in_memory = cache_cfg.get("l0_in_memory", True) and self._cache_enabled
+
+        # L0: 原始计数内存缓存 {idx: raw_counts(820,)}
+        self._raw_cache: dict = {}
+
+        # L1: 验证集完整输出缓存 {idx: (spectrum_tensor, wf_tensor)}
+        self._val_cache: dict = {}
+        self._val_cache_built = False
+
+        # 预加载原始计数到内存（消除 __getitem__ 中的文件I/O）
+        if self._l0_in_memory:
+            self._preload_raw_counts()
+
+        # 验证集自动构建L1缓存（确定性输出，无需每次重算）
+        if not self.is_train and self._cache_enabled:
+            self._build_val_cache()
+
     def _precompute_statistics(self) -> dict:
         """预计算 CPS/导数/工程特征的统计量，并拟合训练集 PCA。"""
         print(f"  [统计量计算] 正在处理 {len(self.file_paths)} 个文件...")
@@ -648,13 +668,86 @@ class GammaSpectrumDataset(Dataset):
             "pca_explained_variance_ratio": pca_stats["pca_explained_variance_ratio"],
         }
 
+    def _preload_raw_counts(self):
+        """预加载所有原始计数到内存，消除 __getitem__ 中的文件I/O。"""
+        print(f"  [L0缓存] 预加载 {len(self.file_paths)} 个原始计数到内存...")
+        for i in range(len(self.file_paths)):
+            self._raw_cache[i] = load_spectrum(
+                self.file_paths[i], self.spectrum_length
+            )
+        mem_mb = len(self._raw_cache) * self.spectrum_length * 4 / 1024 / 1024
+        print(f"  [L0缓存] 完成，内存占用约 {mem_mb:.1f} MB")
+
+    def _build_val_cache(self):
+        """为验证集构建完整输出缓存（仅 is_train=False 且非TTA时有效）。
+
+        缓存内容：标准化后的 spectrum(3,820) 和 window_features(86,)。
+        这些在验证模式下是完全确定性的，无需每个epoch重复计算。
+        """
+        if self._val_cache_built or self.is_train:
+            return
+
+        print(f"  [L1缓存] 构建验证集缓存 ({len(self.file_paths)} 个样本)...")
+        s = self.stats
+
+        for idx in range(len(self.file_paths)):
+            # 获取原始计数（优先从L0缓存）
+            if idx in self._raw_cache:
+                raw_counts = self._raw_cache[idx]
+            else:
+                raw_counts = load_spectrum(
+                    self.file_paths[idx], self.spectrum_length
+                )
+
+            measure_time = self.measure_times[idx]
+            cps = raw_counts / measure_time
+
+            d1, d2 = compute_derivatives(cps, self.smooth_window)
+
+            window_features = extract_engineered_features(
+                cps, self.energy_windows, measure_time, self.stats
+            )
+
+            # Z-score 标准化
+            ch0 = ((cps - s["cps_mean"]) / s["cps_std"]).astype(np.float32)
+            ch1 = ((d1 - s["d1_mean"]) / s["d1_std"]).astype(np.float32)
+            ch2 = ((d2 - s["d2_mean"]) / s["d2_std"]).astype(np.float32)
+            window_features = (
+                (window_features - s["window_mean"]) / s["window_std"]
+            ).astype(np.float32)
+
+            spectrum = np.stack([ch0, ch1, ch2], axis=0)
+
+            self._val_cache[idx] = (
+                torch.FloatTensor(spectrum),
+                torch.FloatTensor(window_features),
+            )
+
+        self._val_cache_built = True
+        print(f"  [L1缓存] 完成")
+
     def __len__(self):
         return len(self.file_paths)
 
     def __getitem__(self, idx):
-        raw_counts = load_spectrum(self.file_paths[idx], self.spectrum_length)
+        # ---- 快速路径：验证集L1缓存命中 ----
+        if (self._cache_enabled
+                and not self.is_train
+                and not self.tta_mode
+                and self._val_cache_built
+                and idx in self._val_cache):
+            spectrum, wf = self._val_cache[idx]
+            return spectrum, wf, self.labels[idx]
+
+        # ---- 获取原始计数（L0缓存或文件读取）----
+        if self._l0_in_memory and idx in self._raw_cache:
+            raw_counts = self._raw_cache[idx]
+        else:
+            raw_counts = load_spectrum(self.file_paths[idx], self.spectrum_length)
+
         measure_time = self.measure_times[idx]
 
+        # ---- CPS 计算（含增强）----
         if self.tta_mode:
             # TTA 模式：仅 Poisson 重采样，保持物理一致性
             cps = augment_spectrum_tta(raw_counts, measure_time)

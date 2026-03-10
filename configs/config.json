@@ -68,6 +68,10 @@
     "stacking": {
         "meta_features": "proba_only"
     },
+    "cache": {
+        "enabled": true,
+        "l0_in_memory": true
+    },
     "output": {
         "checkpoint_dir": "experiments/checkpoints",
         "log_dir": "experiments/logs",
