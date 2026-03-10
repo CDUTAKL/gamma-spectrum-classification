@@ -85,6 +85,7 @@ from src.train import (
 )
 from src.evaluate import evaluate_epoch
 from src.utils import get_logger, load_config, set_seed
+from src.artifacts import save_stacking_oof_artifacts
 
 CLASS_NAMES = ["粘土", "砂土", "粉土"]
 
@@ -667,6 +668,8 @@ def main():
         random_state=config["training"]["seed"] + 100,  # 独立种子
     )
     stack_preds = np.zeros(N, dtype=np.int64)
+    stack_probs = np.zeros((N, C), dtype=np.float64)
+    meta_fold_id = np.zeros(N, dtype=np.int64)
     fold_stack_acc = []
 
     for fold_idx, (train_idx, val_idx) in enumerate(
@@ -682,8 +685,11 @@ def main():
             random_state=config["training"]["seed"],
         )
         meta_clf.fit(meta_X[train_idx], oof_true[train_idx])
-        fold_preds = meta_clf.predict(meta_X[val_idx])
+        fold_proba = meta_clf.predict_proba(meta_X[val_idx])
+        fold_preds = fold_proba.argmax(axis=1)
         stack_preds[val_idx] = fold_preds
+        stack_probs[val_idx] = fold_proba
+        meta_fold_id[val_idx] = fold
 
         fold_acc = accuracy_score(oof_true[val_idx], fold_preds)
         fold_f1 = f1_score(
@@ -728,6 +734,28 @@ def main():
         oof_true, stack_preds, average="macro", zero_division=0
     )
     logger.info(f"\n  Stacking 全局: Acc={global_acc:.4f}  F1={global_f1:.4f}")
+
+    # ================================================================
+    #  训练结束: 输出可视化与逐样本明细 (正确/错误清单)
+    # ================================================================
+    output_cfg = config.get("output", {})
+    artifact_dir = output_cfg.get(
+        "artifact_dir",
+        os.path.join(output_cfg.get("log_dir", "experiments/logs"), "artifacts"),
+    )
+    auto_open = bool(output_cfg.get("auto_open_artifacts", False))
+    save_stacking_oof_artifacts(
+        artifact_dir=artifact_dir,
+        file_paths=all_fps.tolist(),
+        measure_times=all_mts.tolist(),
+        y_true=oof_true,
+        y_pred=stack_preds,
+        y_prob=stack_probs,
+        class_names=CLASS_NAMES,
+        meta_fold=meta_fold_id,
+        auto_open=auto_open,
+        logger=logger,
+    )
     logger.info(f"{'=' * 60}")
     logger.info("训练完成。")
 

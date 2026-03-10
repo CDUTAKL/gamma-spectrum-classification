@@ -68,6 +68,8 @@
     "output": {
         "checkpoint_dir": "experiments/checkpoints",
         "log_dir": "experiments/logs",
+        "artifact_dir": "experiments/artifacts",
+        "auto_open_artifacts": false,
         "best_model_name": "best_model.pth",
         "last_model_name": "last_model.pth"
     }
