@@ -599,20 +599,21 @@ def main():
         logger.info("--- TriBranch CNN 集成 ---")
 
         # 预计算统计量 (只算一次, 所有 seed 共享)
-        base_ds = GammaSpectrumDataset(
-            config, True, tr_fps, tr_lbs, tr_mts
-        )
+        # 注意: 统计量计算本身会完整遍历训练集；此处强制禁用 cache，避免额外的 L0 预加载造成重复 I/O。
+        stats_cfg = copy.deepcopy(config)
+        stats_cache = dict(stats_cfg.get("cache", {}))
+        stats_cache["enabled"] = False
+        stats_cfg["cache"] = stats_cache
+        base_ds = GammaSpectrumDataset(stats_cfg, True, tr_fps, tr_lbs, tr_mts)
         stats = base_ds.stats
         del base_ds
 
+        # 复用数据集对象，避免每个 seed 重建缓存（尤其是验证集 L1 缓存）。
+        tr_ds = GammaSpectrumDataset(config, True, tr_fps, tr_lbs, tr_mts, stats)
+        va_ds = GammaSpectrumDataset(config, False, va_fps, va_lbs, va_mts, stats)
+
         cnn_models = []
         for seed in ensemble_seeds:
-            tr_ds = GammaSpectrumDataset(
-                config, True, tr_fps, tr_lbs, tr_mts, stats
-            )
-            va_ds = GammaSpectrumDataset(
-                config, False, va_fps, va_lbs, va_mts, stats
-            )
             model, acc = train_cnn_model(
                 config, tr_ds, va_ds, device, logger,
                 f"F{fold}", seed,
@@ -620,11 +621,8 @@ def main():
             cnn_models.append(model)
 
         # CNN 集成 + TTA 预测
-        eval_ds = GammaSpectrumDataset(
-            config, False, va_fps, va_lbs, va_mts, stats
-        )
         cnn_probs, true_labels = predict_cnn_tta(
-            cnn_models, eval_ds, device, n_tta
+            cnn_models, va_ds, device, n_tta
         )
 
         cnn_acc = accuracy_score(true_labels, cnn_probs.argmax(axis=1))
