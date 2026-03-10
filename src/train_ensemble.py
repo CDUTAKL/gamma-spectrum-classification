@@ -134,12 +134,25 @@ def parse_args():
 # =====================================================================
 
 def _config_hash(config: dict) -> str:
-    """计算配置的 MD5 指纹，用于验证 OOF 缓存与当前配置一致性。
+    """计算 Phase 1 配置指纹，用于验证 OOF 缓存与当前配置一致性。
 
-    注意：OOF 概率会受大量配置项影响（增强、模型结构、损失函数、cache 等）。
-    因此这里对完整 config 做 canonical JSON 后再 hash，避免误用旧 OOF 缓存。
+    关键点：
+      - 要允许 Phase 2-only 模式覆盖 stacking.meta_features
+      - 要允许读取缓存中的 seed / n_splits 以复现实验
+      - output 路径变化不应使缓存失效
+
+    因此 hash 只覆盖真正会影响 Phase 1 OOF 预测内容的配置子集。
     """
-    raw = json.dumps(config, sort_keys=True, ensure_ascii=False)
+    phase1_cfg = copy.deepcopy(config)
+    phase1_cfg.pop("output", None)
+    phase1_cfg.pop("stacking", None)
+
+    training_cfg = dict(phase1_cfg.get("training", {}))
+    training_cfg.pop("seed", None)
+    training_cfg.pop("n_splits", None)
+    phase1_cfg["training"] = training_cfg
+
+    raw = json.dumps(phase1_cfg, sort_keys=True, ensure_ascii=False)
     return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
 
 
@@ -243,11 +256,6 @@ def load_oof_cache(path: str, config: dict, logger) -> dict:
         )
 
     cached_splits = int(data["n_splits"])
-    expected_splits = config["training"].get("n_splits", 5)
-    if cached_splits != expected_splits:
-        raise ValueError(
-            f"n_splits 不匹配: 缓存={cached_splits}, 配置={expected_splits}"
-        )
 
     # === 形状验证 ===
     oof_cnn = data["oof_cnn"]
@@ -255,6 +263,15 @@ def load_oof_cache(path: str, config: dict, logger) -> dict:
     oof_xgb = data["oof_xgb"]
     oof_true = data["oof_true"]
     N = len(oof_true)
+
+    if len(data["all_fps"]) != N:
+        raise ValueError(f"all_fps 长度不匹配: 期望 {N}, 实际 {len(data['all_fps'])}")
+    if len(data["all_mts"]) != N:
+        raise ValueError(f"all_mts 长度不匹配: 期望 {N}, 实际 {len(data['all_mts'])}")
+    if len(data["stratify_key"]) != N:
+        raise ValueError(
+            f"stratify_key 长度不匹配: 期望 {N}, 实际 {len(data['stratify_key'])}"
+        )
 
     for name, arr in [("oof_cnn", oof_cnn), ("oof_gb", oof_gb), ("oof_xgb", oof_xgb)]:
         if arr.shape != (N, expected_C):
@@ -264,6 +281,20 @@ def load_oof_cache(path: str, config: dict, logger) -> dict:
 
     created_at = str(data["created_at"])
     cached_seed = int(data["seed"])
+    current_seed = int(config["training"]["seed"])
+    current_splits = int(config["training"].get("n_splits", 5))
+
+    if cached_seed != current_seed:
+        logger.warning(
+            f"当前配置 seed={current_seed} 与缓存 seed={cached_seed} 不一致；"
+            f"Phase 2-only 将使用缓存 seed 以保持可复现。"
+        )
+    if cached_splits != current_splits:
+        logger.warning(
+            f"当前配置 n_splits={current_splits} 与缓存 n_splits={cached_splits} 不一致；"
+            f"Phase 2-only 将使用缓存 n_splits 以保持可复现。"
+        )
+
     logger.info(f"  创建时间: {created_at}")
     logger.info(f"  样本数: {N}, 类别数: {cached_C}, Folds: {cached_splits}")
     logger.info(f"  Seed: {cached_seed}, 配置指纹: {cached_hash}")
