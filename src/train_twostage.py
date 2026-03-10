@@ -1,6 +1,10 @@
 """
 两阶段层级分类 + 多种子集成 + TTA（测试时增强）。
 
+【已过时/仅供参考】
+本脚本仍使用旧模型 DualBranchSEModel，未同步主线 TriBranchModel、特征工程与集成评估流程。
+建议优先使用 `src/train_ensemble.py` 作为主训练入口。
+
 Stage 1: 砂土(1) vs 非砂土(0)  —— 简单任务，Cohen's d > 1.0
 Stage 2: 粘土(0) vs 粉土(1)    —— 困难任务，专用模型精细区分
 
@@ -190,6 +194,11 @@ def predict_with_tta(models, dataset, device, n_aug=10, batch_size=64):
 #  主函数
 # ===================================================================
 def main():
+    warnings.warn(
+        "train_twostage.py 使用旧架构 DualBranchSEModel，已不再维护；"
+        "建议使用 src/train_ensemble.py。",
+        category=UserWarning,
+    )
     config_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "configs", "config.json",

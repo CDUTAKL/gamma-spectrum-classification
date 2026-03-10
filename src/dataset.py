@@ -568,15 +568,41 @@ class GammaSpectrumDataset(Dataset):
         print(f"  [统计量计算] 正在处理 {len(self.file_paths)} 个文件...")
         n = len(self.file_paths)
         L = self.spectrum_length
-        window_dim = self.config["model"]["window_feature_dim"]
-        base_feature_dim = window_dim - PCA_COMPONENTS
+        config_window_dim = int(self.config.get("model", {}).get("window_feature_dim", 0))
+        if config_window_dim <= 0:
+            raise ValueError("config.model.window_feature_dim 未设置或非法(<=0)")
 
         all_cps = np.zeros((n, L), dtype=np.float64)
         all_d1 = np.zeros((n, L), dtype=np.float64)
         all_d2 = np.zeros((n, L), dtype=np.float64)
+
+        # 自动推断基础工程特征维度，并与 config 中的 window_feature_dim 做一致性校验。
+        raw0 = load_spectrum(self.file_paths[0], L)
+        cps0 = raw0 / self.measure_times[0]
+        d1_0, d2_0 = compute_derivatives(cps0, self.smooth_window)
+        base0 = extract_energy_window_features(
+            cps0, self.energy_windows, self.measure_times[0]
+        )
+        base_feature_dim = int(base0.shape[0])
+        expected_window_dim = base_feature_dim + PCA_COMPONENTS
+        if config_window_dim != expected_window_dim:
+            raise ValueError(
+                "window_feature_dim 配置与当前特征工程实现不一致："
+                f"配置为 {config_window_dim}，按实现推断应为 {expected_window_dim} "
+                f"(基础 {base_feature_dim} + PCA {PCA_COMPONENTS})。"
+                "请同步修改 configs/config.json -> model.window_feature_dim。"
+            )
+        window_dim = config_window_dim
+
         all_base_wf = np.zeros((n, base_feature_dim), dtype=np.float64)
 
-        for i in range(n):
+        # 先写入第 0 个样本(避免重复计算)
+        all_cps[0] = cps0
+        all_d1[0] = d1_0
+        all_d2[0] = d2_0
+        all_base_wf[0] = base0
+
+        for i in range(1, n):
             raw = load_spectrum(self.file_paths[i], L)
             cps = raw / self.measure_times[i]
             d1, d2 = compute_derivatives(cps, self.smooth_window)
@@ -588,7 +614,7 @@ class GammaSpectrumDataset(Dataset):
             )
             if base_features.shape[0] != base_feature_dim:
                 raise ValueError(
-                    f"基础工程特征维度不匹配：配置要求 {base_feature_dim}，"
+                    f"基础工程特征维度不一致：期望 {base_feature_dim}，"
                     f"实际提取 {base_features.shape[0]}"
                 )
             all_base_wf[i] = base_features

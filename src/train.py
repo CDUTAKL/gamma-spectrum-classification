@@ -233,7 +233,10 @@ def train_single_fold(
             torch.optim.swa_utils.update_bn(train_loader, swa_model, device=device)
             eval_model = swa_model
 
-        val_metrics = evaluate_epoch(eval_model, val_loader, val_criterion, device)
+        class_names = config.get("data", {}).get("class_names")
+        val_metrics = evaluate_epoch(
+            eval_model, val_loader, val_criterion, device, class_names=class_names
+        )
 
         if writer:
             prefix = f"fold{fold}/"

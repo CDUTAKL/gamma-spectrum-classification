@@ -87,7 +87,7 @@ from src.evaluate import evaluate_epoch
 from src.utils import get_logger, load_config, set_seed
 from src.artifacts import save_stacking_oof_artifacts
 
-CLASS_NAMES = ["粘土", "砂土", "粉土"]
+DEFAULT_CLASS_NAMES = ["粘土", "砂土", "粉土"]
 
 
 # =====================================================================
@@ -234,7 +234,7 @@ def train_cnn_model(config, train_ds, val_ds, device, logger, tag, seed):
         config["output"]["checkpoint_dir"], "smae_pretrained.pth"
     )
     if os.path.exists(smae_path):
-        ckpt = torch.load(smae_path, map_location=device)
+        ckpt = torch.load(smae_path, map_location=device, weights_only=True)
         encoder_state = ckpt["encoder_state_dict"]
         # 将 SMAE 编码器权重加载到 transformer_branch
         # 加前缀 "transformer_branch." 适配 TriBranchModel 的 state_dict
@@ -303,7 +303,11 @@ def train_cnn_model(config, train_ds, val_ds, device, logger, tag, seed):
 
         # 验证
         val_metrics = evaluate_epoch(
-            model, val_loader, val_criterion, device
+            model,
+            val_loader,
+            val_criterion,
+            device,
+            class_names=config.get("data", {}).get("class_names"),
         )
         val_acc = val_metrics["accuracy"]
 
@@ -450,6 +454,11 @@ def main():
         "configs", "config.json",
     )
     config = load_config(config_path)
+    class_names = config.get("data", {}).get("class_names") or DEFAULT_CLASS_NAMES
+    if len(class_names) != config["data"]["num_classes"]:
+        raise ValueError(
+            f"class_names 长度({len(class_names)})与 num_classes({config['data']['num_classes']})不一致"
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log_file = os.path.join(
@@ -476,7 +485,7 @@ def main():
 
     logger.info(f"数据总量: {N}")
     for c in range(C):
-        logger.info(f"  {CLASS_NAMES[c]}: {(all_lbs == c).sum()}")
+        logger.info(f"  {class_names[c]}: {(all_lbs == c).sum()}")
 
     # ---- 超参数 ----
     n_splits = config["training"].get("n_splits", 5)
@@ -700,7 +709,7 @@ def main():
 
         logger.info(f"  Fold {fold}: Acc={fold_acc:.4f}  F1={fold_f1:.4f}")
         logger.info(
-            f"\n{classification_report(oof_true[val_idx], fold_preds, target_names=CLASS_NAMES, zero_division=0)}"
+            f"\n{classification_report(oof_true[val_idx], fold_preds, target_names=class_names, zero_division=0)}"
         )
 
     # ================================================================
@@ -751,7 +760,7 @@ def main():
         y_true=oof_true,
         y_pred=stack_preds,
         y_prob=stack_probs,
-        class_names=CLASS_NAMES,
+        class_names=class_names,
         meta_fold=meta_fold_id,
         auto_open=auto_open,
         logger=logger,

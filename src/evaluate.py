@@ -10,7 +10,7 @@ from sklearn.metrics import (classification_report, confusion_matrix,
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-CLASS_NAMES = ["粘土", "砂土", "粉土"]
+DEFAULT_CLASS_NAMES = ["粘土", "砂土", "粉土"]
 
 
 def evaluate_epoch(
@@ -20,6 +20,7 @@ def evaluate_epoch(
     val_loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
+    class_names: list = None,
 ) -> dict:
     model.eval()
     all_preds = []
@@ -40,7 +41,8 @@ def evaluate_epoch(
 
     all_preds = np.array(all_preds)
     all_labels = np.array(all_labels)
-    labels_range = list(range(len(CLASS_NAMES)))
+    class_names = class_names or DEFAULT_CLASS_NAMES
+    labels_range = list(range(len(class_names)))
 
     accuracy = (all_preds == all_labels).mean()
     per_class_f1 = f1_score(all_labels, all_preds, average=None,
@@ -58,6 +60,7 @@ def evaluate_epoch(
         "weighted_f1": float(weighted_f1),
         "per_class_f1": per_class_f1,
         "confusion_matrix": cm,
+        "class_names": class_names,
     }
 
 
@@ -87,18 +90,20 @@ def log_to_tensorboard(
     metrics: dict,
     epoch: int,
     log_dir: str,
+    class_names: list = None,
 ) -> None:
+    class_names = class_names or metrics.get("class_names") or DEFAULT_CLASS_NAMES
     writer.add_scalar("Loss/val", metrics["val_loss"], epoch)
     writer.add_scalar("Accuracy/val", metrics["accuracy"], epoch)
     writer.add_scalar("F1/macro", metrics["macro_f1"], epoch)
     writer.add_scalar("F1/weighted", metrics["weighted_f1"], epoch)
-    for i, name in enumerate(CLASS_NAMES):
+    for i, name in enumerate(class_names):
         writer.add_scalar(f"F1_per_class/{name}",
                           float(metrics["per_class_f1"][i]), epoch)
 
     cm_save_path = os.path.join(log_dir, f"confusion_matrix_epoch{epoch:03d}.png")
     fig = plot_confusion_matrix(
-        metrics["confusion_matrix"], CLASS_NAMES, epoch, save_path=cm_save_path
+        metrics["confusion_matrix"], class_names, epoch, save_path=cm_save_path
     )
     writer.add_figure("Confusion_Matrix", fig, epoch)
     plt.close(fig)
