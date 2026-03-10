@@ -55,9 +55,8 @@ def _plot_confusion_matrix(
     import matplotlib.pyplot as plt
     import seaborn as sns
 
-    cm_disp = cm.astype(np.float64)
-    fmt = "d"
     if normalize:
+        cm_disp = cm.astype(np.float64)
         row_sum = cm_disp.sum(axis=1, keepdims=True)
         cm_disp = np.divide(
             cm_disp,
@@ -66,6 +65,10 @@ def _plot_confusion_matrix(
             where=row_sum != 0,
         )
         fmt = ".2f"
+    else:
+        # seaborn 的 annot+fmt="d" 要求数值是整数；保持计数为 int。
+        cm_disp = cm.astype(np.int64)
+        fmt = "d"
 
     fig, ax = plt.subplots(figsize=(7, 6))
     sns.heatmap(
@@ -152,24 +155,6 @@ def save_stacking_oof_artifacts(
         raise ValueError("meta_fold 与 file_paths 长度不一致")
 
     labels_range = list(range(len(class_names)))
-    cm = confusion_matrix(y_true, y_pred, labels=labels_range)
-
-    counts_png = os.path.join(artifact_dir, "stacking_oof_confusion_counts.png")
-    norm_png = os.path.join(artifact_dir, "stacking_oof_confusion_norm.png")
-    _plot_confusion_matrix(
-        cm,
-        class_names,
-        title="Stacking OOF Confusion Matrix (Counts)",
-        save_path=counts_png,
-        normalize=False,
-    )
-    _plot_confusion_matrix(
-        cm,
-        class_names,
-        title="Stacking OOF Confusion Matrix (Normalized by True)",
-        save_path=norm_png,
-        normalize=True,
-    )
 
     report_dict = classification_report(
         y_true,
@@ -240,17 +225,44 @@ def save_stacking_oof_artifacts(
     mis_csv = os.path.join(artifact_dir, "stacking_oof_misclassified.csv")
     mis_df.to_csv(mis_csv, index=False, encoding="utf-8-sig")
 
+    # 混淆矩阵与 F1 图：尽量保存，但绘图失败不应影响 CSV/metrics 产出。
+    cm = confusion_matrix(y_true, y_pred, labels=labels_range)
+    counts_png = os.path.join(artifact_dir, "stacking_oof_confusion_counts.png")
+    norm_png = os.path.join(artifact_dir, "stacking_oof_confusion_norm.png")
+    try:
+        _plot_confusion_matrix(
+            cm,
+            class_names,
+            title="Stacking OOF Confusion Matrix (Counts)",
+            save_path=counts_png,
+            normalize=False,
+        )
+        _plot_confusion_matrix(
+            cm,
+            class_names,
+            title="Stacking OOF Confusion Matrix (Normalized by True)",
+            save_path=norm_png,
+            normalize=True,
+        )
+    except Exception as e:
+        if logger is not None:
+            logger.warning(f"[Artifacts] 绘制混淆矩阵失败: {e}")
+
     # 每类 F1 图
     per_class_f1 = []
     for name in class_names:
         per_class_f1.append(float(report_dict.get(name, {}).get("f1-score", 0.0)))
     f1_png = os.path.join(artifact_dir, "stacking_oof_per_class_f1.png")
-    _plot_class_f1(
-        class_names,
-        per_class_f1,
-        title="Stacking OOF Per-Class F1",
-        save_path=f1_png,
-    )
+    try:
+        _plot_class_f1(
+            class_names,
+            per_class_f1,
+            title="Stacking OOF Per-Class F1",
+            save_path=f1_png,
+        )
+    except Exception as e:
+        if logger is not None:
+            logger.warning(f"[Artifacts] 绘制 per-class F1 失败: {e}")
 
     if logger is not None:
         logger.info(f"[Artifacts] 已保存至: {os.path.abspath(artifact_dir)}")
