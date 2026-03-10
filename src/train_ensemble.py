@@ -43,10 +43,14 @@
 用法: python src/train_ensemble.py
 """
 
+import argparse
 import copy
+import hashlib
+import json
 import os
 import sys
 import warnings
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -88,6 +92,203 @@ from src.utils import get_logger, load_config, set_seed
 from src.artifacts import save_stacking_oof_artifacts
 
 DEFAULT_CLASS_NAMES = ["粘土", "砂土", "粉土"]
+
+# =====================================================================
+#  CLI 参数解析
+# =====================================================================
+
+def parse_args():
+    """解析命令行参数，支持 Phase 2-only 快速调参模式。"""
+    parser = argparse.ArgumentParser(
+        description="三分支异构集成训练系统 v2 — 支持 OOF 缓存与 Phase 2 快速调参"
+    )
+    parser.add_argument(
+        "--oof-path", type=str, default=None,
+        help="OOF 缓存文件路径 (npz 格式)。"
+             "保存时为输出路径，Phase 2-only 时为输入路径。"
+             "默认: experiments/artifacts/oof_cache.npz"
+    )
+    parser.add_argument(
+        "--phase2-only", action="store_true",
+        help="跳过 Phase 1 (基模型训练)，直接从 OOF 缓存加载并运行 Phase 2 stacking。"
+             "需要已存在的 OOF 缓存文件。"
+    )
+    parser.add_argument(
+        "--save-oof", action="store_true",
+        help="Phase 1 结束后保存 OOF 预测到 npz 文件。"
+             "默认在完整训练时自动开启。"
+    )
+    parser.add_argument(
+        "--meta-features",
+        type=str,
+        choices=["proba_only", "proba+uncertainty", "proba+uncertainty+time"],
+        default=None,
+        help="覆盖 config.json 中 stacking.meta_features 的设置。"
+             "可选: proba_only, proba+uncertainty, proba+uncertainty+time"
+    )
+    return parser.parse_args()
+
+
+# =====================================================================
+#  OOF 缓存 Save / Load
+# =====================================================================
+
+def _config_hash(config: dict) -> str:
+    """计算配置关键字段的 MD5 指纹，用于验证 OOF 缓存与当前配置一致性。"""
+    key_fields = {
+        "num_classes": config["data"]["num_classes"],
+        "spectrum_length": config["data"]["spectrum_length"],
+        "energy_windows": config["data"]["energy_windows"],
+        "n_splits": config["training"].get("n_splits", 5),
+        "seed": config["training"]["seed"],
+        "epochs": config["training"]["epochs"],
+        "batch_size": config["training"]["batch_size"],
+    }
+    raw = json.dumps(key_fields, sort_keys=True)
+    return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+
+def save_oof_cache(
+    path: str,
+    oof_cnn: np.ndarray,
+    oof_gb: np.ndarray,
+    oof_xgb: np.ndarray,
+    oof_true: np.ndarray,
+    all_mts: np.ndarray,
+    all_fps: np.ndarray,
+    stratify_key: np.ndarray,
+    fold_cnn_acc: list,
+    fold_gb_acc: list,
+    fold_xgb_acc: list,
+    fold_fixed_acc: list,
+    config: dict,
+    logger,
+) -> str:
+    """将 Phase 1 的 OOF 预测保存为 npz 压缩文件。
+
+    保存内容:
+      - oof_cnn, oof_gb, oof_xgb: (N, C) 基模型 OOF 概率
+      - oof_true: (N,) 真实标签
+      - all_mts: (N,) 测量时长
+      - all_fps: (N,) 文件路径
+      - stratify_key: (N,) 分层键 (label * 10 + time_bin)
+      - fold_*_acc: 逐 fold 准确率列表
+      - 元数据: config_hash, seed, n_splits, num_classes, created_at
+
+    Returns:
+        保存的文件路径
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    np.savez_compressed(
+        path,
+        # === OOF 概率矩阵 ===
+        oof_cnn=oof_cnn,
+        oof_gb=oof_gb,
+        oof_xgb=oof_xgb,
+        oof_true=oof_true,
+        # === 样本元信息 ===
+        all_mts=all_mts,
+        all_fps=all_fps,
+        stratify_key=stratify_key,
+        # === 逐 fold 准确率 ===
+        fold_cnn_acc=np.array(fold_cnn_acc),
+        fold_gb_acc=np.array(fold_gb_acc),
+        fold_xgb_acc=np.array(fold_xgb_acc),
+        fold_fixed_acc=np.array(fold_fixed_acc),
+        # === 元数据 ===
+        config_hash=np.array(_config_hash(config)),
+        seed=np.array(config["training"]["seed"]),
+        n_splits=np.array(config["training"].get("n_splits", 5)),
+        num_classes=np.array(config["data"]["num_classes"]),
+        created_at=np.array(datetime.now().isoformat()),
+    )
+    file_size = os.path.getsize(path) / 1024
+    logger.info(f"OOF 缓存已保存: {os.path.abspath(path)} ({file_size:.1f} KB)")
+    return path
+
+
+def load_oof_cache(path: str, config: dict, logger) -> dict:
+    """加载 OOF 缓存并验证与当前配置的一致性。
+
+    验证项:
+      - config_hash: 关键超参数是否匹配
+      - num_classes, n_splits: 维度是否一致
+      - oof_cnn/gb/xgb 形状: (N, C) 是否匹配
+
+    Returns:
+        包含所有 OOF 数据和元信息的字典
+
+    Raises:
+        FileNotFoundError: 缓存文件不存在
+        ValueError: 缓存与当前配置不一致
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"OOF 缓存文件不存在: {path}")
+
+    data = np.load(path, allow_pickle=True)
+    logger.info(f"加载 OOF 缓存: {os.path.abspath(path)}")
+
+    # === 元数据验证 ===
+    cached_hash = str(data["config_hash"])
+    current_hash = _config_hash(config)
+    if cached_hash != current_hash:
+        raise ValueError(
+            f"OOF 缓存配置指纹不匹配!\n"
+            f"  缓存: {cached_hash}\n"
+            f"  当前: {current_hash}\n"
+            f"  请重新运行完整训练生成新的 OOF 缓存。"
+        )
+
+    cached_C = int(data["num_classes"])
+    expected_C = config["data"]["num_classes"]
+    if cached_C != expected_C:
+        raise ValueError(
+            f"num_classes 不匹配: 缓存={cached_C}, 配置={expected_C}"
+        )
+
+    cached_splits = int(data["n_splits"])
+    expected_splits = config["training"].get("n_splits", 5)
+    if cached_splits != expected_splits:
+        raise ValueError(
+            f"n_splits 不匹配: 缓存={cached_splits}, 配置={expected_splits}"
+        )
+
+    # === 形状验证 ===
+    oof_cnn = data["oof_cnn"]
+    oof_gb = data["oof_gb"]
+    oof_xgb = data["oof_xgb"]
+    oof_true = data["oof_true"]
+    N = len(oof_true)
+
+    for name, arr in [("oof_cnn", oof_cnn), ("oof_gb", oof_gb), ("oof_xgb", oof_xgb)]:
+        if arr.shape != (N, expected_C):
+            raise ValueError(
+                f"{name} 形状不匹配: 期望 ({N}, {expected_C}), 实际 {arr.shape}"
+            )
+
+    created_at = str(data["created_at"])
+    cached_seed = int(data["seed"])
+    logger.info(f"  创建时间: {created_at}")
+    logger.info(f"  样本数: {N}, 类别数: {cached_C}, Folds: {cached_splits}")
+    logger.info(f"  Seed: {cached_seed}, 配置指纹: {cached_hash}")
+
+    return {
+        "oof_cnn": oof_cnn,
+        "oof_gb": oof_gb,
+        "oof_xgb": oof_xgb,
+        "oof_true": oof_true,
+        "all_mts": data["all_mts"],
+        "all_fps": data["all_fps"],
+        "stratify_key": data["stratify_key"],
+        "fold_cnn_acc": data["fold_cnn_acc"].tolist(),
+        "fold_gb_acc": data["fold_gb_acc"].tolist(),
+        "fold_xgb_acc": data["fold_xgb_acc"].tolist(),
+        "fold_fixed_acc": data["fold_fixed_acc"].tolist(),
+        "seed": cached_seed,
+        "n_splits": cached_splits,
+        "num_classes": cached_C,
+        "created_at": created_at,
+    }
 
 
 # =====================================================================
@@ -381,6 +582,8 @@ def predict_cnn_tta(models, dataset, device,
                     batch_logits = out
                 else:
                     batch_logits = batch_logits + out
+            if batch_logits is None:
+                raise RuntimeError("predict_cnn_tta 收到空模型列表，无法生成 logits")
             # 模型间平均
             all_logits.append(batch_logits / len(models))
             all_labels.extend(labels.tolist())
@@ -405,6 +608,8 @@ def predict_cnn_tta(models, dataset, device,
             aug_accumulated = aug_logits
         else:
             aug_accumulated = aug_accumulated + aug_logits
+    if aug_accumulated is None:
+        raise RuntimeError("TTA 累积 logits 为空，请检查 n_tta 是否大于 0")
     aug_avg = aug_accumulated / n_tta
 
     # 第 3 步: 加权融合
@@ -484,236 +689,68 @@ def extract_ml_features(file_paths, measure_times,
         (N, D) 特征矩阵，当前 D=86
     """
     X = []
+    stats = feature_stats if feature_stats is not None else {}
     for fp, mt in zip(file_paths, measure_times):
         raw = load_spectrum(fp, spectrum_length)
-        cps = raw / mt
+        measure_time = float(mt)
+        cps = raw / measure_time
         features = extract_engineered_features(
-            cps, energy_windows, mt, feature_stats
+            cps, energy_windows, measure_time, stats
         )
         X.append(features)
     return np.array(X, dtype=np.float32)
 
 
-# =====================================================================
-#  主函数
-# =====================================================================
-
-def main():
-    config_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "configs", "config.json",
+def _default_oof_path(config: dict) -> str:
+    output_cfg = config.get("output", {})
+    base_dir = output_cfg.get(
+        "artifact_dir",
+        os.path.join(output_cfg.get("log_dir", "experiments/logs"), "artifacts"),
     )
-    config = load_config(config_path)
-    class_names = config.get("data", {}).get("class_names") or DEFAULT_CLASS_NAMES
-    if len(class_names) != config["data"]["num_classes"]:
-        raise ValueError(
-            f"class_names 长度({len(class_names)})与 num_classes({config['data']['num_classes']})不一致"
-        )
+    return os.path.join(base_dir, "oof_cache.npz")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    log_file = os.path.join(
-        config["output"]["log_dir"], "train_ensemble_v2.log"
+
+def _build_phase2_artifact_dir(config: dict, meta_mode: str, phase2_only: bool) -> str:
+    output_cfg = config.get("output", {})
+    base_dir = output_cfg.get(
+        "artifact_dir",
+        os.path.join(output_cfg.get("log_dir", "experiments/logs"), "artifacts"),
     )
-    logger = get_logger("ensemble_v2", log_file=log_file)
-    logger.info(f"设备: {device}")
-    if device.type == "cuda":
-        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+    safe_mode = str(meta_mode).replace("+", "_")
+    tag = "phase2_only" if phase2_only else "phase2_full"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(base_dir, f"phase2_{tag}_{safe_mode}_{timestamp}")
 
-    # ---- 加载全部数据 ----
-    all_fps, all_lbs, all_mts = [], [], []
-    for d in [config["data"]["train_dir"], config["data"]["val_dir"]]:
-        fps, lbs, mts, _ = scan_directory(d)
-        all_fps.extend(fps)
-        all_lbs.extend(lbs)
-        all_mts.extend(mts)
 
-    all_fps = np.array(all_fps)
-    all_lbs = np.array(all_lbs)
-    all_mts = np.array(all_mts)
-    N = len(all_fps)
+def run_phase2_stacking(
+    *,
+    config: dict,
+    logger,
+    class_names: list[str],
+    all_fps: np.ndarray,
+    all_mts: np.ndarray,
+    stratify_key: np.ndarray,
+    oof_cnn: np.ndarray,
+    oof_gb: np.ndarray,
+    oof_xgb: np.ndarray,
+    oof_true: np.ndarray,
+    fold_cnn_acc: list,
+    fold_gb_acc: list,
+    fold_xgb_acc: list,
+    fold_fixed_acc: list,
+    n_splits: int,
+    seed: int,
+    meta_mode: str,
+    phase2_only: bool,
+) -> dict:
+    """运行 Phase 2 stacking 评估，并输出 artifacts。"""
+    N = len(oof_true)
     C = config["data"]["num_classes"]
 
-    logger.info(f"数据总量: {N}")
-    for c in range(C):
-        logger.info(f"  {class_names[c]}: {(all_lbs == c).sum()}")
-
-    # ---- 超参数 ----
-    n_splits = config["training"].get("n_splits", 5)
-    ensemble_seeds = [42, 43, 44]     # 3-seed CNN 集成
-    n_tta = 3                         # TTA Poisson 重采样次数 (从 10 降到 3)
-    energy_windows = config["data"]["energy_windows"]
-    spectrum_length = config["data"]["spectrum_length"]
-
-    logger.info(f"策略: TriBranch x {len(ensemble_seeds)} + GB + XGB "
-                f"+ Stacking + TTA({n_tta})")
-    logger.info(f"{n_splits}-Fold 交叉验证")
-
-    # ---- 时间分层 K-Fold ----
-    # 按 (label, time_group) 联合分层, 确保每个 fold 时长分布均匀
-    time_bins = np.array([0 if t <= 60 else 1 for t in all_mts])
-    stratify_key = all_lbs * 10 + time_bins
-
-    skf = StratifiedKFold(
-        n_splits=n_splits, shuffle=True,
-        random_state=config["training"]["seed"],
-    )
-
-    # ================================================================
-    #  Phase 1: 收集 out-of-fold 预测
-    # ================================================================
-    logger.info(f"\n{'=' * 60}")
-    logger.info("Phase 1: 训练基模型, 收集 out-of-fold 预测")
-    logger.info(f"{'=' * 60}")
-
-    # 预分配 OOF 概率矩阵 (所有样本的 out-of-fold 预测)
-    oof_cnn = np.zeros((N, C), dtype=np.float64)   # CNN 集成+TTA
-    oof_gb = np.zeros((N, C), dtype=np.float64)     # GradientBoosting
-    oof_xgb = np.zeros((N, C), dtype=np.float64)    # XGBoost
-    oof_true = np.zeros(N, dtype=np.int64)           # 真实标签
-
-    # 逐 fold 记录各基模型的独立准确率 (用于对比分析)
-    fold_cnn_acc = []
-    fold_gb_acc = []
-    fold_xgb_acc = []
-    fold_fixed_acc = []  # 固定权重基线
-
-    for fold_idx, (train_idx, val_idx) in enumerate(
-        skf.split(all_fps, stratify_key)
-    ):
-        fold = fold_idx + 1
-        logger.info(f"\n{'=' * 60}")
-        logger.info(f"Fold {fold}/{n_splits}")
-
-        tr_fps = all_fps[train_idx].tolist()
-        tr_lbs = all_lbs[train_idx].tolist()
-        tr_mts = all_mts[train_idx].tolist()
-        va_fps = all_fps[val_idx].tolist()
-        va_lbs = all_lbs[val_idx].tolist()
-        va_mts = all_mts[val_idx].tolist()
-
-        logger.info(f"  训练: {len(tr_fps)}  验证: {len(va_fps)}")
-
-        # ============================================================
-        #  1a. CNN 集成 (TriBranch x 3 seeds)
-        # ============================================================
-        logger.info("--- TriBranch CNN 集成 ---")
-
-        # 预计算统计量 (只算一次, 所有 seed 共享)
-        # 注意: 统计量计算本身会完整遍历训练集；此处强制禁用 cache，避免额外的 L0 预加载造成重复 I/O。
-        stats_cfg = copy.deepcopy(config)
-        stats_cache = dict(stats_cfg.get("cache", {}))
-        stats_cache["enabled"] = False
-        stats_cfg["cache"] = stats_cache
-        base_ds = GammaSpectrumDataset(stats_cfg, True, tr_fps, tr_lbs, tr_mts)
-        stats = base_ds.stats
-        del base_ds
-
-        # 复用数据集对象，避免每个 seed 重建缓存（尤其是验证集 L1 缓存）。
-        tr_ds = GammaSpectrumDataset(config, True, tr_fps, tr_lbs, tr_mts, stats)
-        va_ds = GammaSpectrumDataset(config, False, va_fps, va_lbs, va_mts, stats)
-
-        cnn_models = []
-        for seed in ensemble_seeds:
-            model, acc = train_cnn_model(
-                config, tr_ds, va_ds, device, logger,
-                f"F{fold}", seed,
-            )
-            cnn_models.append(model)
-
-        # CNN 集成 + TTA 预测
-        cnn_probs, true_labels = predict_cnn_tta(
-            cnn_models, va_ds, device, n_tta
-        )
-
-        cnn_acc = accuracy_score(true_labels, cnn_probs.argmax(axis=1))
-        logger.info(f"  CNN 集成+TTA: Acc = {cnn_acc:.4f}")
-        fold_cnn_acc.append(cnn_acc)
-
-        # ============================================================
-        #  1b. GradientBoosting (SMOTE 增强)
-        # ============================================================
-        logger.info("--- GradientBoosting + SMOTE ---")
-
-        X_train = extract_ml_features(
-            tr_fps, tr_mts, energy_windows, spectrum_length, stats
-        )
-        X_val = extract_ml_features(
-            va_fps, va_mts, energy_windows, spectrum_length, stats
-        )
-        y_train = np.array(tr_lbs)
-        y_val = np.array(va_lbs)
-
-        # 标准化
-        scaler = StandardScaler()
-        X_train_s = scaler.fit_transform(X_train)
-        X_val_s = scaler.transform(X_val)
-
-        # SMOTE 在标准化后的特征空间中过采样
-        X_train_sm, y_train_sm = smote_oversample(X_train_s, y_train, k=5)
-        logger.info(
-            f"  SMOTE: {len(y_train)} -> {len(y_train_sm)} 样本"
-        )
-
-        gb = GradientBoostingClassifier(
-            n_estimators=300, learning_rate=0.05, max_depth=4,
-            min_samples_leaf=5, subsample=0.8,
-            random_state=config["training"]["seed"],
-        )
-        gb.fit(X_train_sm, y_train_sm)
-        gb_probs = gb.predict_proba(X_val_s)
-
-        gb_acc = accuracy_score(y_val, gb_probs.argmax(axis=1))
-        logger.info(f"  GradientBoosting: Acc = {gb_acc:.4f}")
-        fold_gb_acc.append(gb_acc)
-
-        # ============================================================
-        #  1c. XGBoost (SMOTE 增强)
-        # ============================================================
-        logger.info("--- XGBoost + SMOTE ---")
-
-        xgb_model = XGBClassifier(
-            n_estimators=300, learning_rate=0.05, max_depth=4,
-            min_child_weight=3, subsample=0.8, colsample_bytree=0.8,
-            eval_metric='mlogloss',
-            random_state=config["training"]["seed"],
-        )
-        xgb_model.fit(X_train_sm, y_train_sm)
-        xgb_probs = xgb_model.predict_proba(X_val_s)
-
-        xgb_acc = accuracy_score(y_val, xgb_probs.argmax(axis=1))
-        logger.info(f"  XGBoost: Acc = {xgb_acc:.4f}")
-        fold_xgb_acc.append(xgb_acc)
-
-        # ============================================================
-        #  存储 out-of-fold 预测
-        # ============================================================
-        oof_cnn[val_idx] = cnn_probs
-        oof_gb[val_idx] = gb_probs
-        oof_xgb[val_idx] = xgb_probs
-        oof_true[val_idx] = true_labels
-
-        # ---- 固定权重基线 (用于对比) ----
-        fixed_probs = 0.5 * cnn_probs + 0.25 * gb_probs + 0.25 * xgb_probs
-        fixed_preds = fixed_probs.argmax(axis=1)
-        fixed_acc = accuracy_score(true_labels, fixed_preds)
-        logger.info(f"  固定权重融合 (0.5/0.25/0.25): Acc = {fixed_acc:.4f}")
-        fold_fixed_acc.append(fixed_acc)
-
-        # 释放 GPU 显存
-        del cnn_models
-        torch.cuda.empty_cache()
-
-    # ================================================================
-    #  Phase 2: Stacking 元学习器评估
-    # ================================================================
     logger.info(f"\n{'=' * 60}")
     logger.info("Phase 2: Stacking 元学习器")
     logger.info(f"{'=' * 60}")
 
-    # 构建元特征: 默认仅拼接三个基模型的概率预测 (N, 9)
-    # 可选增强: 追加每个基模型的不确定性特征(最大概率/边际/熵)，以及测量时长。
-    stack_cfg = config.get("stacking", {})
-    meta_mode = stack_cfg.get("meta_features", "proba_only")
     meta_X = build_meta_features(
         oof_cnn=oof_cnn,
         oof_gb=oof_gb,
@@ -724,14 +761,10 @@ def main():
     logger.info(f"  元特征模式: {meta_mode}")
     logger.info(f"  元特征维度: {meta_X.shape}")
 
-    # 使用独立的 K-Fold 划分评估元学习器 (不同 random_state)
-    # 避免与 Phase 1 共享划分导致的间接数据泄露:
-    #   Phase 1 基模型的 OOF 预测中, 某些训练样本的预测来自
-    #   "见过" Phase 2 验证样本的基模型, 构成间接信息通路。
-    #   使用独立划分可打破这一通路, 获得更真实的评估。
     meta_skf = StratifiedKFold(
-        n_splits=n_splits, shuffle=True,
-        random_state=config["training"]["seed"] + 100,  # 独立种子
+        n_splits=n_splits,
+        shuffle=True,
+        random_state=seed + 100,
     )
     stack_preds = np.zeros(N, dtype=np.int64)
     stack_probs = np.zeros((N, C), dtype=np.float64)
@@ -742,13 +775,14 @@ def main():
         meta_skf.split(all_fps, stratify_key)
     ):
         fold = fold_idx + 1
-
-        # 训练 XGBoost 元学习器
         meta_clf = XGBClassifier(
-            n_estimators=100, max_depth=3, learning_rate=0.1,
-            min_child_weight=3, subsample=0.8,
+            n_estimators=100,
+            max_depth=3,
+            learning_rate=0.1,
+            min_child_weight=3,
+            subsample=0.8,
             eval_metric='mlogloss',
-            random_state=config["training"]["seed"],
+            random_state=seed,
         )
         meta_clf.fit(meta_X[train_idx], oof_true[train_idx])
         fold_proba = meta_clf.predict_proba(meta_X[val_idx])
@@ -769,9 +803,6 @@ def main():
             f"\n{classification_report(oof_true[val_idx], fold_preds, target_names=class_names, zero_division=0)}"
         )
 
-    # ================================================================
-    #  最终汇总
-    # ================================================================
     logger.info(f"\n{'=' * 60}")
     logger.info("最终结果对比")
     logger.info(f"{'=' * 60}")
@@ -785,30 +816,23 @@ def main():
     }
 
     for name, accs in results.items():
+        if not accs:
+            continue
         avg = np.mean(accs)
         std = np.std(accs)
-        per_fold = "  ".join(
-            [f"F{i+1}={a:.4f}" for i, a in enumerate(accs)]
-        )
+        per_fold = "  ".join([f"F{i+1}={a:.4f}" for i, a in enumerate(accs)])
         logger.info(f"  {name}:")
         logger.info(f"    {per_fold}")
         logger.info(f"    平均: {avg:.4f} +/- {std:.4f}")
 
-    # 全局 Stacking 指标
     global_acc = accuracy_score(oof_true, stack_preds)
     global_f1 = f1_score(
         oof_true, stack_preds, average="macro", zero_division=0
     )
     logger.info(f"\n  Stacking 全局: Acc={global_acc:.4f}  F1={global_f1:.4f}")
 
-    # ================================================================
-    #  训练结束: 输出可视化与逐样本明细 (正确/错误清单)
-    # ================================================================
     output_cfg = config.get("output", {})
-    artifact_dir = output_cfg.get(
-        "artifact_dir",
-        os.path.join(output_cfg.get("log_dir", "experiments/logs"), "artifacts"),
-    )
+    artifact_dir = _build_phase2_artifact_dir(config, meta_mode, phase2_only)
     auto_open = bool(output_cfg.get("auto_open_artifacts", False))
     save_stacking_oof_artifacts(
         artifact_dir=artifact_dir,
@@ -824,6 +848,253 @@ def main():
     )
     logger.info(f"{'=' * 60}")
     logger.info("训练完成。")
+
+    return {
+        "global_acc": float(global_acc),
+        "global_f1": float(global_f1),
+        "artifact_dir": artifact_dir,
+        "meta_mode": meta_mode,
+        "fold_stack_acc": fold_stack_acc,
+    }
+
+
+# =====================================================================
+#  主函数
+# =====================================================================
+
+def main():
+    args = parse_args()
+    config_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "configs", "config.json",
+    )
+    config = load_config(config_path)
+    if args.meta_features is not None:
+        config.setdefault("stacking", {})["meta_features"] = args.meta_features
+
+    class_names = config.get("data", {}).get("class_names") or DEFAULT_CLASS_NAMES
+    if len(class_names) != config["data"]["num_classes"]:
+        raise ValueError(
+            f"class_names 长度({len(class_names)})与 num_classes({config['data']['num_classes']})不一致"
+        )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    log_file = os.path.join(config["output"]["log_dir"], "train_ensemble_v2.log")
+    logger = get_logger("ensemble_v2", log_file=log_file)
+    logger.info(f"设备: {device}")
+    if device.type == "cuda":
+        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+    logger.info(
+        f"运行模式: {'Phase 2-only' if args.phase2_only else '完整训练 + Phase 2'}"
+    )
+
+    all_fps, all_lbs, all_mts = [], [], []
+    for d in [config["data"]["train_dir"], config["data"]["val_dir"]]:
+        fps, lbs, mts, _ = scan_directory(d)
+        all_fps.extend(fps)
+        all_lbs.extend(lbs)
+        all_mts.extend(mts)
+
+    all_fps = np.asarray(all_fps)
+    all_lbs = np.asarray(all_lbs, dtype=np.int64)
+    all_mts = np.asarray(all_mts, dtype=np.float64)
+    N = len(all_fps)
+    C = config["data"]["num_classes"]
+
+    logger.info(f"数据总量: {N}")
+    for c in range(C):
+        logger.info(f"  {class_names[c]}: {(all_lbs == c).sum()}")
+
+    n_splits = config["training"].get("n_splits", 5)
+    ensemble_seeds = [42, 43, 44]
+    n_tta = 3
+    energy_windows = config["data"]["energy_windows"]
+    spectrum_length = config["data"]["spectrum_length"]
+
+    logger.info(
+        f"策略: TriBranch x {len(ensemble_seeds)} + GB + XGB + Stacking + TTA({n_tta})"
+    )
+    logger.info(f"{n_splits}-Fold 交叉验证")
+
+    time_bins = np.array([0 if t <= 60 else 1 for t in all_mts], dtype=np.int64)
+    stratify_key = all_lbs * 10 + time_bins
+    skf = StratifiedKFold(
+        n_splits=n_splits,
+        shuffle=True,
+        random_state=config["training"]["seed"],
+    )
+
+    meta_mode = config.get("stacking", {}).get("meta_features", "proba_only")
+    oof_path = args.oof_path or _default_oof_path(config)
+    save_oof = bool(args.save_oof or not args.phase2_only)
+
+    if args.phase2_only:
+        cached = load_oof_cache(oof_path, config, logger)
+        all_fps = np.asarray(cached["all_fps"])
+        all_mts = np.asarray(cached["all_mts"], dtype=np.float64)
+        stratify_key = np.asarray(cached["stratify_key"], dtype=np.int64)
+        oof_cnn = np.asarray(cached["oof_cnn"], dtype=np.float64)
+        oof_gb = np.asarray(cached["oof_gb"], dtype=np.float64)
+        oof_xgb = np.asarray(cached["oof_xgb"], dtype=np.float64)
+        oof_true = np.asarray(cached["oof_true"], dtype=np.int64)
+        fold_cnn_acc = list(cached["fold_cnn_acc"])
+        fold_gb_acc = list(cached["fold_gb_acc"])
+        fold_xgb_acc = list(cached["fold_xgb_acc"])
+        fold_fixed_acc = list(cached["fold_fixed_acc"])
+        n_splits = int(cached["n_splits"])
+        phase2_seed = int(cached["seed"])
+        logger.info("跳过 Phase 1，直接使用缓存 OOF 进入 Phase 2。")
+    else:
+        logger.info(f"\n{'=' * 60}")
+        logger.info("Phase 1: 训练基模型, 收集 out-of-fold 预测")
+        logger.info(f"{'=' * 60}")
+
+        oof_cnn = np.zeros((N, C), dtype=np.float64)
+        oof_gb = np.zeros((N, C), dtype=np.float64)
+        oof_xgb = np.zeros((N, C), dtype=np.float64)
+        oof_true = np.zeros(N, dtype=np.int64)
+        fold_cnn_acc = []
+        fold_gb_acc = []
+        fold_xgb_acc = []
+        fold_fixed_acc = []
+
+        for fold_idx, (train_idx, val_idx) in enumerate(skf.split(all_fps, stratify_key)):
+            fold = fold_idx + 1
+            logger.info(f"\n{'=' * 60}")
+            logger.info(f"Fold {fold}/{n_splits}")
+
+            tr_fps = all_fps[train_idx].tolist()
+            tr_lbs = all_lbs[train_idx].tolist()
+            tr_mts = all_mts[train_idx].tolist()
+            va_fps = all_fps[val_idx].tolist()
+            va_lbs = all_lbs[val_idx].tolist()
+            va_mts = all_mts[val_idx].tolist()
+            logger.info(f"  训练: {len(tr_fps)}  验证: {len(va_fps)}")
+
+            logger.info("--- TriBranch CNN 集成 ---")
+            stats_cfg = copy.deepcopy(config)
+            stats_cache = dict(stats_cfg.get("cache", {}))
+            stats_cache["enabled"] = False
+            stats_cfg["cache"] = stats_cache
+            base_ds = GammaSpectrumDataset(stats_cfg, True, tr_fps, tr_lbs, tr_mts)
+            stats = base_ds.stats
+            del base_ds
+
+            tr_ds = GammaSpectrumDataset(config, True, tr_fps, tr_lbs, tr_mts, stats)
+            va_ds = GammaSpectrumDataset(config, False, va_fps, va_lbs, va_mts, stats)
+
+            cnn_models = []
+            for seed in ensemble_seeds:
+                model, _ = train_cnn_model(
+                    config, tr_ds, va_ds, device, logger, f"F{fold}", seed
+                )
+                cnn_models.append(model)
+
+            cnn_probs, true_labels = predict_cnn_tta(cnn_models, va_ds, device, n_tta)
+            cnn_acc = accuracy_score(true_labels, cnn_probs.argmax(axis=1))
+            logger.info(f"  CNN 集成+TTA: Acc = {cnn_acc:.4f}")
+            fold_cnn_acc.append(cnn_acc)
+
+            logger.info("--- GradientBoosting + SMOTE ---")
+            X_train = extract_ml_features(
+                tr_fps, tr_mts, energy_windows, spectrum_length, stats
+            )
+            X_val = extract_ml_features(
+                va_fps, va_mts, energy_windows, spectrum_length, stats
+            )
+            y_train = np.asarray(tr_lbs, dtype=np.int64)
+            y_val = np.asarray(va_lbs, dtype=np.int64)
+            scaler = StandardScaler()
+            X_train_s = scaler.fit_transform(X_train)
+            X_val_s = scaler.transform(X_val)
+            X_train_sm, y_train_sm = smote_oversample(X_train_s, y_train, k=5)
+            logger.info(f"  SMOTE: {len(y_train)} -> {len(y_train_sm)} 样本")
+
+            gb = GradientBoostingClassifier(
+                n_estimators=300,
+                learning_rate=0.05,
+                max_depth=4,
+                min_samples_leaf=5,
+                subsample=0.8,
+                random_state=config["training"]["seed"],
+            )
+            gb.fit(X_train_sm, y_train_sm)
+            gb_probs = gb.predict_proba(X_val_s)
+            gb_acc = accuracy_score(y_val, gb_probs.argmax(axis=1))
+            logger.info(f"  GradientBoosting: Acc = {gb_acc:.4f}")
+            fold_gb_acc.append(gb_acc)
+
+            logger.info("--- XGBoost + SMOTE ---")
+            xgb_model = XGBClassifier(
+                n_estimators=300,
+                learning_rate=0.05,
+                max_depth=4,
+                min_child_weight=3,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                eval_metric='mlogloss',
+                random_state=config["training"]["seed"],
+            )
+            xgb_model.fit(X_train_sm, y_train_sm)
+            xgb_probs = xgb_model.predict_proba(X_val_s)
+            xgb_acc = accuracy_score(y_val, xgb_probs.argmax(axis=1))
+            logger.info(f"  XGBoost: Acc = {xgb_acc:.4f}")
+            fold_xgb_acc.append(xgb_acc)
+
+            oof_cnn[val_idx] = cnn_probs
+            oof_gb[val_idx] = gb_probs
+            oof_xgb[val_idx] = xgb_probs
+            oof_true[val_idx] = true_labels
+
+            fixed_probs = 0.5 * cnn_probs + 0.25 * gb_probs + 0.25 * xgb_probs
+            fixed_preds = fixed_probs.argmax(axis=1)
+            fixed_acc = accuracy_score(true_labels, fixed_preds)
+            logger.info(f"  固定权重融合 (0.5/0.25/0.25): Acc = {fixed_acc:.4f}")
+            fold_fixed_acc.append(fixed_acc)
+
+            del cnn_models
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        if save_oof:
+            save_oof_cache(
+                path=oof_path,
+                oof_cnn=oof_cnn,
+                oof_gb=oof_gb,
+                oof_xgb=oof_xgb,
+                oof_true=oof_true,
+                all_mts=all_mts,
+                all_fps=all_fps,
+                stratify_key=stratify_key,
+                fold_cnn_acc=fold_cnn_acc,
+                fold_gb_acc=fold_gb_acc,
+                fold_xgb_acc=fold_xgb_acc,
+                fold_fixed_acc=fold_fixed_acc,
+                config=config,
+                logger=logger,
+            )
+        phase2_seed = config["training"]["seed"]
+
+    run_phase2_stacking(
+        config=config,
+        logger=logger,
+        class_names=class_names,
+        all_fps=all_fps,
+        all_mts=all_mts,
+        stratify_key=stratify_key,
+        oof_cnn=oof_cnn,
+        oof_gb=oof_gb,
+        oof_xgb=oof_xgb,
+        oof_true=oof_true,
+        fold_cnn_acc=fold_cnn_acc,
+        fold_gb_acc=fold_gb_acc,
+        fold_xgb_acc=fold_xgb_acc,
+        fold_fixed_acc=fold_fixed_acc,
+        n_splits=n_splits,
+        seed=phase2_seed,
+        meta_mode=str(meta_mode),
+        phase2_only=args.phase2_only,
+    )
 
 
 if __name__ == "__main__":
