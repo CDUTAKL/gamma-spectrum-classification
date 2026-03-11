@@ -562,8 +562,6 @@ def train_cnn_model(config, train_ds, val_ds, device, logger, tag, seed):
         sm = torch.cuda.get_device_capability(device)
         logger.info(f"  GPU 计算能力: sm_{sm[0]}{sm[1]}, AMP: {use_amp}")
     scaler = torch.amp.GradScaler("cuda") if use_amp else None
-    use_amp = device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda") if use_amp else None
 
     patience = config["training"].get("early_stopping_patience", 30)
     stopper = EarlyStopping(patience) if patience > 0 else None
@@ -608,15 +606,6 @@ def train_cnn_model(config, train_ds, val_ds, device, logger, tag, seed):
         # NaN 检测：验证准确率为 NaN 说明模型输出有问题
         if np.isnan(val_acc):
             raise NaNDetectionError(f"验证准确率为 NaN，模型输出可能已发散")
-
-        val_metrics = evaluate_epoch(
-            model,
-            val_loader,
-            val_criterion,
-            device,
-            class_names=config.get("data", {}).get("class_names"),
-        )
-        val_acc = val_metrics["accuracy"]
 
         if val_acc > best_acc:
             best_acc = val_acc
@@ -720,12 +709,16 @@ def predict_cnn_tta(models, dataset, device,
 
     # 第 3 步: 加权融合
     final_logits = clean_weight * clean_logits + (1 - clean_weight) * aug_avg
+    check_finite(clean_logits, "clean_logits")
+    check_finite(aug_avg, "aug_avg")
+    check_finite(final_logits, "final_logits")
 
     # 恢复原始状态
     dataset.is_train = orig_is_train
     dataset.tta_mode = orig_tta_mode
 
     probs = torch.softmax(final_logits, dim=1).numpy()
+    check_finite(torch.from_numpy(probs), "cnn_probs")
     return probs, labels
 
 
@@ -1135,12 +1128,6 @@ def main():
             config["training"]["use_compile"] = use_compile_orig
             if use_amp_orig is not None:
                 config["training"]["use_amp"] = use_amp_orig
-
-            for seed in ensemble_seeds:
-                model, _ = train_cnn_model(
-                    config, tr_ds, va_ds, device, logger, f"F{fold}", seed
-                )
-                cnn_models.append(model)
 
             cnn_probs, true_labels = predict_cnn_tta(cnn_models, va_ds, device, n_tta)
             cnn_acc = accuracy_score(true_labels, cnn_probs.argmax(axis=1))
