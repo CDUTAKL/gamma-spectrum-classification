@@ -1083,6 +1083,8 @@ def main():
             va_ds = GammaSpectrumDataset(config, False, va_fps, va_lbs, va_mts, stats)
 
             cnn_models = []
+            cnn_probs = None
+            true_labels = None
             # ---- CNN 训练 + 自动重试逻辑 ----
             # 策略: 第一次尝试正常训练 -> 如果 NaN 则禁用 compile -> 再 NaN 则禁用 AMP
             use_compile_orig = config["training"].get("use_compile", False)
@@ -1103,11 +1105,17 @@ def main():
                     config["training"]["use_amp"] = use_amp_val
                 
                 try:
+                    cnn_models = []
                     for seed in ensemble_seeds:
                         model, _ = train_cnn_model(
                             config, tr_ds, va_ds, device, logger, f"F{fold}", seed
                         )
                         cnn_models.append(model)
+
+                    # 推理阶段也可能出现 NaN/Inf; 纳入重试闭环。
+                    cnn_probs, true_labels = predict_cnn_tta(
+                        cnn_models, va_ds, device, n_tta
+                    )
                     # 如果成功，跳出重试循环
                     break
                 except NaNDetectionError as e:
@@ -1117,6 +1125,8 @@ def main():
                     if device.type == "cuda":
                         torch.cuda.empty_cache()
                     cnn_models = []  # 清空重试列表
+                    cnn_probs = None
+                    true_labels = None
                     # 继续下一次重试
             else:
                 # 所有策略都失败
@@ -1126,10 +1136,10 @@ def main():
             
             # 恢复原始配置
             config["training"]["use_compile"] = use_compile_orig
-            if use_amp_orig is not None:
-                config["training"]["use_amp"] = use_amp_orig
+            config["training"]["use_amp"] = use_amp_orig
 
-            cnn_probs, true_labels = predict_cnn_tta(cnn_models, va_ds, device, n_tta)
+            if cnn_probs is None or true_labels is None:
+                raise RuntimeError("CNN 推理未产生有效输出 (cnn_probs/true_labels 为空)")
             cnn_acc = accuracy_score(true_labels, cnn_probs.argmax(axis=1))
             logger.info(f"  CNN 集成+TTA: Acc = {cnn_acc:.4f}")
             fold_cnn_acc.append(cnn_acc)
