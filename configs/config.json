@@ -64,7 +64,7 @@
         "seed": 42,
         "swa_start_epoch": 0.75,
         "use_compile": true,
-        "use_amp": null
+        "use_amp": false
     },
     "stacking": {
         "meta_features": "proba+uncertainty"
