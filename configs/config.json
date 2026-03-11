@@ -61,9 +61,9 @@
         "num_workers": 0,
         "seed": 42,
         "swa_start_epoch": 0.75,
-        "swa_lr": 1e-4,
-        "val_interval": 5,
-        "use_compile": true
+        "use_compile": true,
+        "use_amp": null
+    },
     },
     "stacking": {
         "meta_features": "proba_only"

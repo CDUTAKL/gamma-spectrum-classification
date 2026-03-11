@@ -405,6 +405,67 @@ def smote_oversample(X: np.ndarray, y: np.ndarray,
 
 
 # =====================================================================
+#  GPU 能力检测与 AMP 配置
+# =====================================================================
+
+def get_gpu_compute_capability(device: torch.device) -> tuple[int, int]:
+    """获取 GPU 计算能力 (major, minor)。
+    
+    返回: (major, minor)，如 RTX 5090 为 (9, 0)，GTX 1650 为 (7, 5)
+    """
+    if device.type != "cuda":
+        return (0, 0)
+    props = torch.cuda.get_device_properties(device)
+    return (props.major, props.minor)
+
+
+def should_use_amp(config: dict, device: torch.device) -> bool:
+    """根据配置和 GPU 能力自动判断是否启用 AMP。
+    
+    规则:
+      - 如果 config 中明确设置 use_amp，使用该值
+      - 否则默认 True，但 sm_75 及以下 (如 GTX 1650) 默认 False
+    """
+    # 1. 如果配置中明确设置，使用配置值
+    use_amp_cfg = config["training"].get("use_amp")
+    if use_amp_cfg is not None:
+        return use_amp_cfg
+    
+    # 2. 非 CUDA 设备不启用 AMP
+    if device.type != "cuda":
+        return False
+    
+    # 3. 检测 GPU 计算能力
+    major, minor = get_gpu_compute_capability(device)
+    sm = major * 10 + minor  # 如 7*10+5=75
+    
+    # 4. sm_75 及以下默认关闭 AMP (GTX 1650 = sm_75)
+    if sm <= 75:
+        return False
+    
+    return True
+
+
+# =====================================================================
+#  NaN 检测异常
+# =====================================================================
+
+class NaNDetectionError(Exception):
+    """训练过程中检测到 NaN 或 Inf 时抛出此异常。"""
+    pass
+
+
+def check_finite(tensor: torch.Tensor, name: str = "tensor"):
+    """检查 tensor 是否包含 NaN 或 Inf，若有则抛出异常。"""
+    if not torch.isfinite(tensor).all():
+        raise NaNDetectionError(
+            f"检测到非有限值 (NaN/Inf) in {name}: "
+            f"finite={tensor.isfinite().sum().item()}, "
+            f"nan={tensor.isnan().sum().item()}, "
+            f"inf={tensor.isinf().sum().item()}"
+        )
+
+# =====================================================================
 #  Phase 1: 基模型训练与预测
 # =====================================================================
 
@@ -495,7 +556,12 @@ def train_cnn_model(config, train_ds, val_ds, device, logger, tag, seed):
     optimizer = build_optimizer(model, config)
     scheduler = build_scheduler(optimizer, config)
 
-    # AMP: 仅在 CUDA 设备上启用混合精度
+    # AMP: 根据 GPU 能力和配置自动决定是否启用混合精度
+    use_amp = should_use_amp(config, device)
+    if device.type == "cuda":
+        sm = torch.cuda.get_device_capability(device)
+        logger.info(f"  GPU 计算能力: sm_{sm[0]}{sm[1]}, AMP: {use_amp}")
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
     use_amp = device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda") if use_amp else None
 
@@ -530,6 +596,19 @@ def train_cnn_model(config, train_ds, val_ds, device, logger, tag, seed):
             continue
 
         # 验证
+        val_metrics = evaluate_epoch(
+            model,
+            val_loader,
+            val_criterion,
+            device,
+            class_names=config.get("data", {}).get("class_names"),
+        )
+        val_acc = val_metrics["accuracy"]
+        
+        # NaN 检测：验证准确率为 NaN 说明模型输出有问题
+        if np.isnan(val_acc):
+            raise NaNDetectionError(f"验证准确率为 NaN，模型输出可能已发散")
+
         val_metrics = evaluate_epoch(
             model,
             val_loader,
@@ -1011,6 +1090,52 @@ def main():
             va_ds = GammaSpectrumDataset(config, False, va_fps, va_lbs, va_mts, stats)
 
             cnn_models = []
+            # ---- CNN 训练 + 自动重试逻辑 ----
+            # 策略: 第一次尝试正常训练 -> 如果 NaN 则禁用 compile -> 再 NaN 则禁用 AMP
+            use_compile_orig = config["training"].get("use_compile", False)
+            use_amp_orig = config["training"].get("use_amp")
+            
+            retry_strategies = [
+                # (use_compile, use_amp, description)
+                (True, None, "默认配置"),
+                (False, None, "禁用 torch.compile 重试"),
+                (False, False, "禁用 AMP 重试"),
+            ]
+            
+            last_error = None
+            for use_compile_val, use_amp_val, strategy_desc in retry_strategies:
+                # 应用本次策略
+                config["training"]["use_compile"] = use_compile_val
+                if use_amp_val is not None:
+                    config["training"]["use_amp"] = use_amp_val
+                
+                try:
+                    for seed in ensemble_seeds:
+                        model, _ = train_cnn_model(
+                            config, tr_ds, va_ds, device, logger, f"F{fold}", seed
+                        )
+                        cnn_models.append(model)
+                    # 如果成功，跳出重试循环
+                    break
+                except NaNDetectionError as e:
+                    last_error = e
+                    logger.warning(f"  检测到 NaN ({strategy_desc}): {e}")
+                    # 清理 GPU 缓存
+                    if device.type == "cuda":
+                        torch.cuda.empty_cache()
+                    cnn_models = []  # 清空重试列表
+                    # 继续下一次重试
+            else:
+                # 所有策略都失败
+                raise RuntimeError(
+                    f"CNN 训练失败，已尝试所有重试策略: {last_error}"
+                )
+            
+            # 恢复原始配置
+            config["training"]["use_compile"] = use_compile_orig
+            if use_amp_orig is not None:
+                config["training"]["use_amp"] = use_amp_orig
+
             for seed in ensemble_seeds:
                 model, _ = train_cnn_model(
                     config, tr_ds, va_ds, device, logger, f"F{fold}", seed
@@ -1084,6 +1209,26 @@ def main():
                 torch.cuda.empty_cache()
 
         if save_oof:
+            # ---- OOF 保存前 finite 检查 ----
+            # 检查 oof_cnn 是否包含 NaN，若有则拒绝保存并报错
+            cnn_finite = np.isfinite(oof_cnn).all()
+            gb_finite = np.isfinite(oof_gb).all()
+            xgb_finite = np.isfinite(oof_xgb).all()
+            
+            if not cnn_finite:
+                logger.error(
+                    f"oof_cnn 包含 NaN/Inf! "
+                    f"finite={np.isfinite(oof_cnn).sum()}/{oof_cnn.size}, "
+                    f"nan={np.isnan(oof_cnn).sum()}, inf={np.isinf(oof_cnn).sum()}"
+                )
+                raise ValueError("oof_cnn 包含非有限值，拒绝保存。请检查 CNN 训练过程。")
+            if not gb_finite or not xgb_finite:
+                logger.warning(
+                    f"oof_gb 或 oof_xgb 包含 NaN/Inf，GB: {gb_finite}, XGB: {xgb_finite}"
+                )
+            
+            logger.info(f"  OOF finite 检查通过: CNN={cnn_finite}, GB={gb_finite}, XGB={xgb_finite}")
+            
             save_oof_cache(
                 path=oof_path,
                 oof_cnn=oof_cnn,
@@ -1101,6 +1246,7 @@ def main():
                 logger=logger,
             )
         phase2_seed = config["training"]["seed"]
+            
 
     run_phase2_stacking(
         config=config,
