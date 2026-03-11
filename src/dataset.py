@@ -471,13 +471,21 @@ def augment_spectrum(
     """对原始计数执行随机增强，返回增强后的 CPS 谱。"""
     counts = raw_counts.copy()
 
+    # 时长感知增强：短时长样本本身计数低，额外噪声和通道平移适当减弱
+    mt = float(measure_time)
+    local_channel_shift_max = channel_shift_max
+    local_gaussian_noise_std = gaussian_noise_std
+    if mt <= 60.0:
+        local_channel_shift_max = 0
+        local_gaussian_noise_std = gaussian_noise_std * 0.5
+
     if poisson_resample and random.random() < aug_prob:
         counts = np.random.poisson(counts.astype(np.int64)).astype(np.float32)
 
     cps = counts / measure_time
 
-    if channel_shift_max > 0 and random.random() < aug_prob:
-        shift = random.randint(-channel_shift_max, channel_shift_max)
+    if local_channel_shift_max > 0 and random.random() < aug_prob:
+        shift = random.randint(-local_channel_shift_max, local_channel_shift_max)
         if shift != 0:
             cps = np.roll(cps, shift)
             if shift > 0:
@@ -485,8 +493,8 @@ def augment_spectrum(
             else:
                 cps[shift:] = 0.0
 
-    if gaussian_noise_std > 0 and random.random() < aug_prob:
-        noise = np.random.normal(0, gaussian_noise_std * cps.mean(), size=cps.shape)
+    if local_gaussian_noise_std > 0 and random.random() < aug_prob:
+        noise = np.random.normal(0, local_gaussian_noise_std * cps.mean(), size=cps.shape)
         cps = np.clip(cps + noise, 0, None).astype(np.float32)
 
     return cps
