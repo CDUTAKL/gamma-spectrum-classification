@@ -65,7 +65,7 @@
         "use_amp": null
     },
     "stacking": {
-        "meta_features": "proba_only"
+        "meta_features": "proba+uncertainty"
     },
     "cache": {
         "enabled": true,
