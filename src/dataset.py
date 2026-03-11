@@ -808,13 +808,29 @@ class GammaSpectrumDataset(Dataset):
         total = len(self.labels)
         # 基础：按 1/freq 做类平衡采样权重
         weights_per_class = total / (num_classes * np.maximum(counts, 1))
-        # 额外：允许通过 training.class_sample_multipliers 对某些类（如粉土）再加权
         train_cfg = self.config.get("training", {})
+
+        # 额外 1：允许通过 training.class_sample_multipliers 对某些类（如粉土）再加权
         multipliers = train_cfg.get("class_sample_multipliers")
         if multipliers is not None and len(multipliers) == num_classes:
             multipliers = np.asarray(multipliers, dtype=float)
             weights_per_class = weights_per_class * multipliers
-        sample_weights = np.array([weights_per_class[lb] for lb in self.labels])
+
+        # 先按类权重初始化每个样本的采样权重
+        sample_weights = np.array([weights_per_class[lb] for lb in self.labels], dtype=float)
+
+        # 额外 2：可选的按测量时长加权，对短时长样本略微提高采样权重
+        # 期望配置示例：{"30": 1.2, "60": 1.05, "120": 1.0, "150": 1.0}
+        time_mult_cfg = train_cfg.get("time_sample_multipliers")
+        if time_mult_cfg is not None and hasattr(self, "measure_times"):
+            for i, mt in enumerate(self.measure_times):
+                try:
+                    key = str(int(mt))
+                    w_t = float(time_mult_cfg.get(key, 1.0))
+                except Exception:
+                    w_t = 1.0
+                sample_weights[i] *= w_t
+
         return torch.FloatTensor(sample_weights)
 
 
