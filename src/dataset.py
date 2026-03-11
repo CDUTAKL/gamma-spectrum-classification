@@ -308,9 +308,18 @@ def extract_energy_window_features(cps_spectrum: np.ndarray, energy_windows: dic
     features.append(float(spec.max()))
     features.append(float((spec > eps).sum()) / 820.0)
 
-    # 测量时间 (1维)
+    # 测量时间 + 全局 Poisson 噪声因子 (2维)
+    # total_counts ≈ total_cps * measure_time, 相对噪声幅度 ~ 1/sqrt(total_counts)
     if measure_time is not None:
-        features.append(float(measure_time))
+        mt = float(measure_time)
+        features.append(mt)
+        total_counts = total_cps * mt
+        noise_factor = float(1.0 / np.sqrt(total_counts + eps))
+        features.append(noise_factor)
+    else:
+        # 保持维度一致
+        features.append(0.0)
+        features.append(0.0)
 
     # ---- 新增物理判别特征 (8维) ----
     # Th/K 比值：经典黏土矿物判别指标

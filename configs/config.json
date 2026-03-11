@@ -34,7 +34,7 @@
         "se_reduction": 4,
         "fc_dims": [128],
         "dropouts": [0.3],
-        "window_feature_dim": 86,
+        "window_feature_dim": 87,
         "window_hidden_dim": 64,
         "transformer": {
             "patch_size": 10,
@@ -52,7 +52,7 @@
         "weight_decay": 1e-4,
         "loss_type": "focal",
         "focal_gamma": 2.0,
-        "focal_alpha": [1.0, 0.5, 1.5],
+        "focal_alpha": [1.0, 0.5, 2.0],
         "label_smoothing": 0.1,
         "warmup_epochs": 10,
         "early_stopping_patience": 30,
