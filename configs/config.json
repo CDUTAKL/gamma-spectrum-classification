@@ -54,6 +54,7 @@
         "loss_type": "focal",
         "focal_gamma": 2.0,
         "focal_alpha": [1.0, 0.5, 2.0],
+        "class_sample_multipliers": [1.0, 1.0, 1.5],
         "label_smoothing": 0.1,
         "warmup_epochs": 10,
         "early_stopping_patience": 30,

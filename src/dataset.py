@@ -798,7 +798,14 @@ class GammaSpectrumDataset(Dataset):
         num_classes = self.config["data"]["num_classes"]
         counts = np.bincount(self.labels, minlength=num_classes).astype(float)
         total = len(self.labels)
+        # 基础：按 1/freq 做类平衡采样权重
         weights_per_class = total / (num_classes * np.maximum(counts, 1))
+        # 额外：允许通过 training.class_sample_multipliers 对某些类（如粉土）再加权
+        train_cfg = self.config.get("training", {})
+        multipliers = train_cfg.get("class_sample_multipliers")
+        if multipliers is not None and len(multipliers) == num_classes:
+            multipliers = np.asarray(multipliers, dtype=float)
+            weights_per_class = weights_per_class * multipliers
         sample_weights = np.array([weights_per_class[lb] for lb in self.labels])
         return torch.FloatTensor(sample_weights)
 
