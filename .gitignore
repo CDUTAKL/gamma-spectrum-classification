@@ -27,3 +27,8 @@ experiments/checkpoints/*
 .idea/
 .vscode/
 .claude/
+
+# ========================
+# 4. 其他不必要的文件   
+# ========================
+artifacts_archive/
