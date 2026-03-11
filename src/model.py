@@ -285,6 +285,17 @@ class SpectralTransformerBranch(nn.Module):
 #  TriBranchModel — 三分支融合模型 (本项目核心创新模型)
 # =====================================================================
 
+class ZeroBranch(nn.Module):
+    """占位分支：始终输出零向量，用于在关闭 Transformer 分支时保持融合维度一致。"""
+    def __init__(self, out_dim: int):
+        super().__init__()
+        self.out_dim = out_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, L) -> return (B, out_dim) 全零向量
+        return x.new_zeros(x.size(0), self.out_dim)
+
+
 class TriBranchModel(nn.Module):
     """三分支融合分类模型。
 
@@ -320,6 +331,8 @@ class TriBranchModel(nn.Module):
         num_classes = data_cfg["num_classes"]
         in_channels = model_cfg.get("in_channels", 3)
         se_reduction = model_cfg.get("se_reduction", 4)
+        # 是否启用 Transformer 分支；默认启用，方便通过 config 做消融实验
+        self.use_transformer_branch = model_cfg.get("use_transformer_branch", True)
 
         # ================ 分支1: Multi-Scale SE-CNN ================
         ms_channels = model_cfg.get("multi_scale_channels", [48, 96, 192])
@@ -351,6 +364,8 @@ class TriBranchModel(nn.Module):
             dropout=trans_cfg.get("dropout", 0.1),
         )
         trans_out_dim = trans_cfg.get("embed_dim", 64)
+        # 记录 Transformer 分支输出维度，便于在关闭分支时构造零向量占位
+        self.trans_out_dim = trans_out_dim
 
         # ================ 分支3: MLP (工程特征) ================
         window_feature_dim = model_cfg["window_feature_dim"]
@@ -398,7 +413,10 @@ class TriBranchModel(nn.Module):
         x_cnn = torch.cat([x_avg, x_max], dim=1)
 
         # 分支2: Transformer - 全局谱段关联
-        x_trans = self.transformer_branch(spectrum)
+        if self.use_transformer_branch:
+            x_trans = self.transformer_branch(spectrum)
+        else:
+            x_trans = x_cnn.new_zeros(x_cnn.size(0), self.trans_out_dim)
 
         # 分支3: MLP - 领域先验特征
         x_mlp = self.mlp_branch(window_features)

@@ -36,6 +36,7 @@
         "dropouts": [0.3],
         "window_feature_dim": 87,
         "window_hidden_dim": 64,
+        "use_transformer_branch": false,
         "transformer": {
             "patch_size": 10,
             "embed_dim": 64,
