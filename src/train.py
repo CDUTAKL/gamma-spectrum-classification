@@ -136,16 +136,22 @@ def train_one_epoch(
 
 
 class EarlyStopping:
-    def __init__(self, patience: int = 30):
+    def __init__(self, patience: int = 30, min_epochs: int = 0):
         self.patience = patience
+        self.min_epochs = max(int(min_epochs), 0)
         self.counter = 0
         self.best_score = -float("inf")
 
-    def step(self, score: float) -> bool:
+    def step(self, score: float, epoch: int | None = None) -> bool:
         if score > self.best_score:
             self.best_score = score
             self.counter = 0
             return False
+
+        # 在达到最小训练轮数前，不累计 early stopping 计数
+        if epoch is not None and epoch < self.min_epochs:
+            return False
+
         self.counter += 1
         return self.counter >= self.patience
 
@@ -176,7 +182,11 @@ def train_single_fold(
     scheduler = build_scheduler(optimizer, config)
 
     patience = config["training"].get("early_stopping_patience", 0)
-    early_stopper = EarlyStopping(patience=patience) if patience > 0 else None
+    min_epochs = config["training"].get("min_epochs_before_early_stop", 0)
+    early_stopper = (
+        EarlyStopping(patience=patience, min_epochs=min_epochs)
+        if patience > 0 else None
+    )
 
     ckpt_dir = config["output"]["checkpoint_dir"]
     ckpt_manager = CheckpointManager(ckpt_dir)
@@ -261,7 +271,7 @@ def train_single_fold(
             ckpt_manager.save(model, optimizer, epoch, val_metrics, is_best=True)
             logger.info(f"  Fold {fold} 新最优！验证 Acc: {val_metrics['accuracy']:.4f}")
 
-        if early_stopper and early_stopper.step(val_metrics["accuracy"]):
+        if early_stopper and early_stopper.step(val_metrics["accuracy"], epoch=epoch):
             logger.info(
                 f"  Fold {fold} Early Stopping @ Epoch {epoch}，"
                 f"最佳 Acc: {early_stopper.best_score:.4f}"

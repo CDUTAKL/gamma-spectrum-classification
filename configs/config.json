@@ -64,6 +64,7 @@
         "label_smoothing": 0.1,
         "warmup_epochs": 10,
         "early_stopping_patience": 30,
+        "min_epochs_before_early_stop": 60,
         "n_splits": 5,
         "lr_scheduler": "cosine",
         "num_workers": 0,

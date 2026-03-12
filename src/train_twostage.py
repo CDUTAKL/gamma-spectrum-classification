@@ -78,7 +78,11 @@ def train_stage(config, train_ds, val_ds, device, logger, tag, seed):
     scheduler = build_scheduler(optimizer, config)
 
     patience = config["training"].get("early_stopping_patience", 30)
-    stopper = EarlyStopping(patience) if patience > 0 else None
+    min_epochs = config["training"].get("min_epochs_before_early_stop", 0)
+    stopper = (
+        EarlyStopping(patience=patience, min_epochs=min_epochs)
+        if patience > 0 else None
+    )
 
     best_acc = 0.0
     best_state = None
@@ -118,7 +122,7 @@ def train_stage(config, train_ds, val_ds, device, logger, tag, seed):
             best_acc = val_acc
             best_state = copy.deepcopy(model.state_dict())
 
-        if stopper and stopper.step(val_acc):
+        if stopper and stopper.step(val_acc, epoch=epoch):
             logger.info(
                 f"  {tag} Seed{seed}: Early Stop @ Epoch {epoch}, "
                 f"Best Val Acc = {best_acc:.4f}"
