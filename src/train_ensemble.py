@@ -897,8 +897,8 @@ def run_phase2_stacking(
 
         if meta_learner == "logreg":
             from sklearn.linear_model import LogisticRegression
+            # 为兼容不同版本的 scikit-learn，这里不显式传 multi_class，交由默认策略处理
             meta_clf = LogisticRegression(
-                multi_class="multinomial",
                 solver="lbfgs",
                 C=0.5,
                 max_iter=1000,
