@@ -1,5 +1,6 @@
 import os
 import random
+import csv
 
 import numpy as np
 import torch
@@ -580,6 +581,10 @@ class GammaSpectrumDataset(Dataset):
         else:
             self.stats = self._precompute_statistics()
 
+        # 样本级权重（默认全为 1.0，可通过 noisy_silt_candidates.csv 做人工降权）
+        self._per_sample_multipliers = np.ones(len(self.file_paths), dtype=float)
+        self._load_per_sample_multipliers()
+
         # ---- 缓存初始化 ----
         cache_cfg = config.get("cache", {})
         self._cache_enabled = cache_cfg.get("enabled", False)
@@ -743,6 +748,59 @@ class GammaSpectrumDataset(Dataset):
         self._val_cache_built = True
         print(f"  [L1缓存] 完成")
 
+    # ------------------------------------------------------------------
+    #  样本级权重：基于人工审查的 noisy_silt_candidates.csv
+    # ------------------------------------------------------------------
+
+    def _load_per_sample_multipliers(self) -> None:
+        """从 artifacts/noisy_silt_candidates.csv 读取 sample_weight，构建 file_path->multiplier 映射。
+
+        设计原则：
+          - 文件不存在或解析失败时静默跳过，保持默认权重 1.0；
+          - 仅当 CSV 中存在与当前 file_path 完全匹配的行时才应用 sample_weight；
+          - 该机制主要用于对“高置信度错分的粉土样本”做降权，不改变其它样本。
+        """
+        try:
+            proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            csv_path = os.path.join(
+                proj_root, "experiments", "artifacts", "noisy_silt_candidates.csv"
+            )
+            if not os.path.exists(csv_path):
+                return
+
+            # 兼容 UTF-8 / GBK 两种编码（Excel 在 Windows 下一般存为 GBK）
+            path_to_weight = {}
+            for enc in ("utf-8", "gbk"):
+                try:
+                    with open(csv_path, "r", encoding=enc, newline="") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            fp = row.get("file_path")
+                            w = row.get("sample_weight", "").strip()
+                            if not fp or not w:
+                                continue
+                            try:
+                                weight = float(w)
+                            except ValueError:
+                                continue
+                            path_to_weight[fp] = weight
+                    break
+                except UnicodeDecodeError:
+                    path_to_weight = {}
+                    continue
+
+            if not path_to_weight:
+                return
+
+            # 按当前数据集的 file_paths 生成样本级乘子
+            for i, fp in enumerate(self.file_paths):
+                w = path_to_weight.get(fp)
+                if w is not None:
+                    self._per_sample_multipliers[i] = float(w)
+        except Exception as e:
+            # 出错时保持默认权重，不中断训练
+            print(f"  [SampleWeights] 读取 noisy_silt_candidates.csv 失败: {e}")
+
     def __len__(self):
         return len(self.file_paths)
 
@@ -830,6 +888,10 @@ class GammaSpectrumDataset(Dataset):
                 except Exception:
                     w_t = 1.0
                 sample_weights[i] *= w_t
+
+        # 额外 3：样本级降权（人工审查的 noisy_silt_candidates.csv）
+        if hasattr(self, "_per_sample_multipliers"):
+            sample_weights *= self._per_sample_multipliers
 
         return torch.FloatTensor(sample_weights)
 
