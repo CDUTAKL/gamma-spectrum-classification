@@ -142,7 +142,12 @@ class EarlyStopping:
         self.counter = 0
         self.best_score = -float("inf")
 
-    def step(self, score: float, epoch: int | None = None) -> bool:
+    def step(self, score: float, epoch=None) -> bool:
+        """更新 early stopping 计数；返回 True 表示应当停止。
+
+        在 Python 3.9 环境下不使用 ``int | None`` 这类联合类型写法，
+        保持与 5090/本机两侧解释器兼容。
+        """
         if score > self.best_score:
             self.best_score = score
             self.counter = 0
