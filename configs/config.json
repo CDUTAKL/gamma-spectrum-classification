@@ -73,7 +73,8 @@
         "use_amp": false
     },
     "stacking": {
-        "meta_features": "proba+uncertainty"
+        "meta_features": "proba+uncertainty",
+        "meta_learner": "xgb"
     },
     "cache": {
         "enabled": true,

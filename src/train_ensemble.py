@@ -755,9 +755,20 @@ def build_meta_features(
       - "proba_only": concat [cnn, gb, xgb] -> (N, 9)
       - "proba+uncertainty": add 3*3 uncertainty features -> (N, 18)
       - "proba+uncertainty+time": add log(measure_time) -> (N, 19)
+      - "uncertainty_only": only use 3*3 uncertainty features -> (N, 9)
     """
-    base = np.hstack([oof_cnn, oof_gb, oof_xgb]).astype(np.float32)
     mode = (mode or "proba_only").strip().lower()
+
+    # 仅不确定性特征：不包含原始概率
+    if mode == "uncertainty_only":
+        parts = [
+            _meta_uncertainty_features(oof_cnn),
+            _meta_uncertainty_features(oof_gb),
+            _meta_uncertainty_features(oof_xgb),
+        ]
+        return np.hstack(parts).astype(np.float32)
+
+    base = np.hstack([oof_cnn, oof_gb, oof_xgb]).astype(np.float32)
     if mode == "proba_only":
         return base
 
@@ -865,6 +876,11 @@ def run_phase2_stacking(
         shuffle=True,
         random_state=seed + 100,
     )
+
+    # 选择 stacking 元学习器类型（默认 XGB，可切换为 logreg 等）
+    stacking_cfg = config.get("stacking", {})
+    meta_learner = stacking_cfg.get("meta_learner", "xgb").lower()
+
     stack_preds = np.zeros(N, dtype=np.int64)
     stack_probs = np.zeros((N, C), dtype=np.float64)
     meta_fold_id = np.zeros(N, dtype=np.int64)
@@ -874,15 +890,26 @@ def run_phase2_stacking(
         meta_skf.split(all_fps, stratify_key)
     ):
         fold = fold_idx + 1
-        meta_clf = XGBClassifier(
-            n_estimators=100,
-            max_depth=3,
-            learning_rate=0.1,
-            min_child_weight=3,
-            subsample=0.8,
-            eval_metric='mlogloss',
-            random_state=seed,
-        )
+
+        if meta_learner == "logreg":
+            from sklearn.linear_model import LogisticRegression
+            meta_clf = LogisticRegression(
+                multi_class="multinomial",
+                solver="lbfgs",
+                C=0.5,
+                max_iter=1000,
+                n_jobs=-1,
+            )
+        else:
+            meta_clf = XGBClassifier(
+                n_estimators=100,
+                max_depth=3,
+                learning_rate=0.1,
+                min_child_weight=3,
+                subsample=0.8,
+                eval_metric='mlogloss',
+                random_state=seed,
+            )
         meta_clf.fit(meta_X[train_idx], oof_true[train_idx])
         fold_proba = meta_clf.predict_proba(meta_X[val_idx])
         fold_preds = fold_proba.argmax(axis=1)
