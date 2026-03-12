@@ -121,7 +121,7 @@ def parse_args():
     parser.add_argument(
         "--meta-features",
         type=str,
-        choices=["proba_only", "proba+uncertainty", "proba+uncertainty+time"],
+        choices=["proba_only", "proba+uncertainty", "proba+uncertainty+time", "uncertainty_only"],
         default=None,
         help="覆盖 config.json 中 stacking.meta_features 的设置。"
              "可选: proba_only, proba+uncertainty, proba+uncertainty+time"
