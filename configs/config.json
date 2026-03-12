@@ -74,7 +74,7 @@
     },
     "stacking": {
         "meta_features": "proba+uncertainty",
-        "meta_learner": "xgb"
+        "meta_learner": "logreg"
     },
     "cache": {
         "enabled": true,
