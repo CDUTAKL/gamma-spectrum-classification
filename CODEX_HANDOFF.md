@@ -1,433 +1,412 @@
-# 伽马能谱土壤分类项目说明报告
+# 伽马能谱土壤分类项目说明与交接文档
 
-> 文档类型: 项目说明报告 (由原“交接文档”升级而来)
+> 文档类型：项目现状说明 / 持续交接文档
 >
-> 首次成稿: 2026-03-09 (Claude)
+> 仓库地址：`https://github.com/CDUTAKL/gamma-spectrum-classification`
 >
-> 最近更新: 2026-03-10 (Codex)
+> 最近重写时间：2026-03-13
 >
-> 代码仓库: `https://github.com/CDUTAKL/gamma-spectrum-classification`
+> 重写时本地分支提交：`352a3d8 feat: add physics-guided silt features`
 
-本项目使用 820 通道伽马能谱计数数据，对土壤类型进行三分类(粘土/砂土/粉土)。当前方案以“特征工程 + 三分支深度模型 + 传统 ML + Stacking”为主线，目标是将 Stacking 全局准确率提升到 80%+。
+## 一、项目当前处于什么阶段
 
-本报告面向“下一位开发者/复现实验者”，核心内容是: 数据与标签约定、特征流水线、模型与训练流程、结果复盘、已知问题与运维要点、关键文件速查。
+这个项目已经不再是早期“搭框架”阶段，而是进入了：
 
----
+- 主流程稳定可训练
+- 已做过多轮完整实验
+- 已完成误分类驱动的人工审查与软处理
+- 当前主要矛盾聚焦在“粉土”与“粘土/砂土”的边界样本
+- 后续优化重点应转向更贴近顽固粉土错分的特征设计
 
-## 一、项目概述
+一句话概括当前状态：
 
-### 1.1 任务定义
+**模型框架已经成型，当前瓶颈不是能不能训练，而是如何把 persistent 粉土错分进一步压下去。**
 
-输入: 每个样本为一个 `.txt` 文件，包含 820 个通道的计数值(原始 counts)。每个样本对应一个测量时长(30/60/120/150 秒)以及一个土壤类别标签。
 
-输出: 3 类土壤标签：
+## 二、任务定义
 
-| 类别 ID | 类别名 | 备注 |
-|---|---|---|
-| 0 | 粘土 | 与粉土易混 |
-| 1 | 砂土 | 相对最容易 |
-| 2 | 粉土 | 核心瓶颈(样本少、与粘土特征重叠) |
+输入：
+- 每个样本为一个 `.txt` 文件
+- 含 820 个通道的伽马能谱计数
+- 每个样本带测量时长：`30s / 60s / 120s / 150s`
 
-### 1.2 数据格式与目录
+输出：
+- 三分类土壤标签
+  - `0`: 粘土
+  - `1`: 砂土
+  - `2`: 粉土
 
-- 输入文件: `.txt`，每行一个通道计数，共 820 行。
-- 文件名包含两个关键信息:
-  - 测量时长: 例如 `30s`、`60s`、`120s`、`150s`
-  - 标签字段: 例如 `标签一/标签二/标签三/标签四` 等(见 `src/dataset.py:parse_filename`)
-- 目录(本地 Windows 默认):
-  - 训练数据: `E:/data/xunlian`
-  - 验证数据: `E:/data/yanzheng`
-- 实际训练使用方式:
-  - `train_ensemble.py` 会扫描 `train_dir` 与 `val_dir` 两个目录后合并，做 5-Fold 交叉验证(用于更稳定的评估与对比)。
+目标：
+- `Stacking Acc >= 0.80`
 
-### 1.3 复现一致性要求(用于可比性)
+当前实际情况：
+- 最强结果仍在 `0.776` 左右
+- 粉土仍是主瓶颈
 
-为了让不同实验之间“可比”，需要保持以下三点一致：
 
-1. 数据路径与数据内容不变。
-2. 固定随机种子 `seed=42`。
-3. 5-Fold 划分方式不变：`StratifiedKFold` + “时间分层”(按测量时长分 bin 与标签联合分层)。
+## 三、当前主入口与核心文件
 
-### 1.4 运行环境与依赖
+主入口：
+- [`src/train_ensemble.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/train_ensemble.py)
 
-本地推荐环境(Windows)：
+关键文件：
 
-- Python: conda 环境 `xsypytorch` (用户自建)
-- PyTorch: 2.6.0+cu124
-- CUDA: 12.4
-- GPU: GTX 1650(4GB) 可跑通，但耗时较长
+- [`configs/config.json`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/configs/config.json)
+  - 训练、模型、特征、stacking 配置
 
-依赖(见 [requirements.txt](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/requirements.txt))：
+- [`src/dataset.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/dataset.py)
+  - 文件解析
+  - 数据增强
+  - 工程特征提取
+  - PCA 统计
+  - `sample_weight` 样本级降权逻辑
 
-- `torch/torchvision`, `numpy/scipy/pandas`
-- `scikit-learn`, `matplotlib/seaborn`, `tensorboard`, `tqdm`
-- `PyWavelets`
-- `xgboost` (部分云镜像需要单独 `pip install xgboost`)
+- [`src/model.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/model.py)
+  - TriBranch 模型定义
+  - transformer 分支可通过配置关闭
 
----
+- [`src/train.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/train.py)
+  - 单模型训练工具函数
 
-## 二、仓库结构与产物目录
+- [`src/artifacts.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/artifacts.py)
+  - 训练后产物导出
+  - 混淆矩阵、F1 图、预测明细、误分类清单
 
-项目根目录结构(关键项)：
+- [`plot_noisy_silt.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/plot_noisy_silt.py)
+  - 本地人工审查 hard silt 样本时的辅助出图脚本
+  - 注意：这个文件当前本地还有未提交修改
 
-```
-Gamma Energy Spectrum Label Classification Prediction/
-  configs/
-    config.json                 # 训练与特征/模型超参配置
-  src/
-    dataset.py                  # 数据加载、增强、特征工程、PCA/统计量(重点)
-    model.py                    # TriBranch 模型定义、SMAE 等
-    train.py                    # 单模型训练循环(K-Fold 内部用)
-    train_ensemble.py           # 主入口：集成训练系统 v2
-    train_ml.py                 # 传统 ML 训练(备用/辅助)
-    pretrain_smae.py            # SMAE 自监督预训练(已提供权重)
-    evaluate.py                 # 评估/混淆矩阵绘图(训练中用)
-    artifacts.py                # 训练结束导出可视化与逐样本预测明细(新增)
-    utils.py                    # logger/config/seed 等
-  experiments/
-    checkpoints/
-      smae_pretrained.pth       # SMAE 预训练权重(已纳入 Git 追踪)
-      best_model.pth            # 训练中写入
-      last_model.pth            # 训练中写入
-    logs/
-      train_ensemble_v2.log     # 主训练日志
-      events.out.tfevents...    # TensorBoard
-    artifacts/                  # 训练结束自动产物(新增)
-      stacking_oof_*.png/csv    # 混淆矩阵/正确错误清单等
-```
+- [`experiments/artifacts/`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts)
+  - 完整训练产物
+  - OOF cache
+  - 人工审查 CSV
+
+
+## 四、数据路径与评估口径
+
+本地默认路径：
+- `E:/data/xunlian`
+- `E:/data/yanzheng`
+
+AutoDL 路径：
+- `/root/autodl-tmp/gamma/gamma_data/xunlian`
+- `/root/autodl-tmp/gamma/gamma_data/yanzheng`
+
+评估规则：
+- 训练时会合并 `train_dir + val_dir`
+- 用 `StratifiedKFold`
+- 同时考虑测量时长分层
+- 固定 `seed = 42`
+
+稳定观察结论：
+- `30s` 一直最难
+- `60s` 次难
+- `120s / 150s` 明显更稳定
+
+
+## 五、当前模型与训练配置
+
+当前配置文件中的关键设置：
+
+- `window_feature_dim = 92`
+- `use_transformer_branch = false`
+- `loss_type = focal`
+- `focal_gamma = 2.0`
+- `focal_alpha = [1.0, 0.5, 2.0]`
+- `meta_features = proba+uncertainty`
+- `meta_learner = logreg`
+
+本地常用：
+- `num_workers = 0`
+
+5090 常用：
+- `batch_size = 512`
+- `num_workers = 16`
+
+编译与 AMP：
+- `torch.compile(..., backend="aot_eager")`
+- `train_ensemble.py` 已加入有限重试与 finite 检查，主要用于防 GTX 1650 本地异常
+
+
+## 六、当前特征工程状态
+
+### 6.1 已经有的特征
+
+当前已经落地的特征包括：
+
+- SG 导数相关输入
+- 对数比值特征
+- 小波能量特征
+- PCA 得分
+- 峰局部对比特征
+- 按测量时长加权
+- 基于人工审查结果的样本级降权
+
+### 6.2 当前维度
+
+当前总特征维度：
+- 基础工程特征：`77`
+- PCA：`15`
+- 合计：`92`
+
+对应关系：
+- `configs/config.json -> model.window_feature_dim = 92`
 
 说明：
+- `src/dataset.py` 里的 `_precompute_statistics()` 会自动校验维度
+- 如果以后再加特征，必须同步更新 `window_feature_dim`
 
-- `experiments/` 目录通常体积很大，仓库 `.gitignore` 默认忽略，但已“白名单”保留 `experiments/checkpoints/smae_pretrained.pth`，确保云端 `git clone` 后可直接训练。
-- 训练结束的可视化/清单输出默认写入 `experiments/artifacts/`，可通过配置修改。
+### 6.3 最近新增的一批物理特征
 
----
+在提交 `352a3d8 feat: add physics-guided silt features` 中，新加了 5 个特征：
 
-## 三、数据处理与特征工程流水线
+- 净峰面积比值 `net_k / net_th`
+- 净峰面积比值 `net_th / net_u`
+- 净峰面积比值 `net_k / net_u`
+- `compton_curvature`
+- `net_peak_fraction`
 
-### 3.1 总流程(单样本)
+这一版实验结论：
+- 对整体结构有少量帮助
+- 但没有实质改善粉土主瓶颈
+- 当前最佳结果仍不是这版
 
-从文件到模型输入的流程如下：
 
-1. 读取 counts: `load_spectrum(fp) -> raw_counts (820,)`
-2. 训练时增强(TTA/训练增强)：
-   - Poisson 重采样(模拟统计涨落)
-   - 通道平移(模拟能量刻度漂移)
-   - 高斯噪声
-3. 转 CPS 谱: `cps = raw_counts / measure_time`
-4. 三通道输入构造：
-   - 通道 1: CPS
-   - 通道 2: CPS 的一阶导数(使用 SG 滤波导数)
-   - 通道 3: CPS 的二阶导数(使用 SG 滤波导数)
-5. 能窗工程特征提取(重点)：`extract_engineered_features(cps, energy_windows, measure_time, stats)`
-6. 特征标准化：Z-score(仅使用训练 fold 统计量，避免泄漏)
+## 七、OOF 缓存与 Phase2-only 能力
 
-最终每个样本返回：
+当前项目已经支持：
 
-- `spectrum`: shape `(3, 820)`
-- `window_features`: shape `(D,)`，当前 `D=86`(见 3.4)
-- `label`: `int` in `{0,1,2}`
+- `--oof-path`
+- `--phase2-only`
+- `--save-oof`
+- `--meta-features`
 
-### 3.2 能窗定义
+对应文件：
+- [`experiments/artifacts/oof_cache.npz`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/oof_cache.npz)
 
-配置在 `config.json:data.energy_windows`：
+这套能力已经稳定，作用是：
+- 完整跑一次 Phase 1 后保存 OOF
+- 后续只改 stacking 元特征时，不需要重复跑完整训练
 
-- K: `[327, 396]`
-- U: `[426, 496]`
-- Th: `[682, 820]`
+当前已做的防护：
+- `allow_pickle=False`
+- `config_hash` 校验
+- metadata 校验
+- OOF finite 检查
 
-这些窗口来自经验设定，用于提取核素相关峰区与背景信息。
 
-### 3.3 统计量与“无泄漏”原则
+## 八、训练后产物与“老三样”
 
-本项目对特征做了“训练 fold 统计量”驱动的处理，避免验证集信息泄漏到训练中：
+每次完整训练结束后，产物目录在：
+- [`experiments/artifacts/`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts)
 
-- `GammaSpectrumDataset` 会在构建时对训练 fold 做 `_precompute_statistics()`，统计：
-  - `feature_mean/feature_std`：用于窗口特征 Z-score
-  - `pca`：在训练 fold 的“基础特征”上拟合 PCA，再对训练/验证 fold 做 transform
-- 传统 ML 分支也会使用相同的 `stats`(由 `extract_ml_features(..., feature_stats=stats)` 注入)，保证 ML 的 PCA 特征同样“无泄漏”。
+典型产物：
+- `stacking_oof_metrics.json`
+- `stacking_oof_report.txt`
+- `stacking_oof_predictions.csv`
+- `stacking_oof_misclassified.csv`
+- `stacking_oof_confusion_counts.png`
+- `stacking_oof_confusion_norm.png`
+- `stacking_oof_per_class_f1.png`
 
-### 3.4 当前窗口特征维度 D=86 (含已落地优化 1-5)
+当前这条项目线约定的“老三样”是：
+1. `stacking_oof_metrics.json`
+2. `stacking_oof_predictions.csv` 的混淆矩阵
+3. `measure_time` 分组准确率
 
-`window_feature_dim` 位于 `config.json:model.window_feature_dim`，当前为 `86`。其组成如下(以实现为准)：
 
-1. 基础能窗/物理先验特征：`71` 维
-2. PCA 得分特征：`15` 维
+## 九、人工审查 / 软处理这条线目前做到哪了
 
-合计: `71 + 15 = 86`
+主文件：
+- [`experiments/artifacts/noisy_silt_candidates.csv`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/noisy_silt_candidates.csv)
 
-其中“已落地的优化项(1-5)”对应的关键增量：
+已做过的轮次：
+- [`experiments/artifacts/noisy_silt_candidates_round2.csv`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/noisy_silt_candidates_round2.csv)
+- [`experiments/artifacts/noisy_silt_candidates_round3.csv`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/noisy_silt_candidates_round3.csv)
 
-- 优化 1: SG 滤波导数(影响谱输入 3 通道的质量，不改变 D)
-- 优化 2: 小波能量特征(并入窗口特征，增加若干维)
-- 优化 3: PCA 得分特征(+15 维，训练 fold 拟合)
-- 优化 4: 对数比值特征(增加若干维)
-- 优化 5: 峰局部对比/局部矩特征(每个能窗 4 维，共 12 维)
+当前口径：
+- 这些 `sample_weight` 不是“属于粉土的概率”
+- 而是“这个带着粉土标签的样本，值不值得被当成标准粉土强监督学习”
 
-#### 3.4.1 峰局部对比特征(优化 5)定义(实现口径)
+经验结论：
+- `round2` 带来了主要收益
+- `round3` 仍有一点帮助，但已经明显进入收益递减
+- 大规模继续做 `round4 / round5` 不划算
 
-对每个能窗(K/U/Th)提取 4 维，代码在 `dataset.py:_extract_peak_local_contrast_features`：
 
-- `peak_ratio`: 峰高 / 局部背景均值
-- `peak_snr`: (峰高 - 背景) / 背景噪声(MAD 近似)
-- `peak_offset`: 峰位置相对能窗中心的偏移(归一化到 [0,1] 左右)
-- `peak_focus`: 峰能量集中度(局部能量占比的 proxy)
+## 十、当前最佳结果与最近几轮结果
 
-这些特征的目标是增强“峰显著性、峰定位可靠性、峰形差异”的表征，针对粉土/粘土易混问题做补强。
+### 10.1 当前强基准
 
----
+目前最值得当作强基准对比的结果是：
+- 目录：
+  - [`experiments/artifacts/phase2_phase2_full_proba_uncertainty_20260312_224059`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/phase2_phase2_full_proba_uncertainty_20260312_224059)
+- 指标：
+  - `Accuracy = 0.7762`
+  - `Macro-F1 = 0.7470`
 
-## 四、模型架构与训练系统
+这是当前主要 benchmark。
 
-### 4.1 TriBranchModel(三分支融合)
+### 10.2 最近几轮结论
 
-TriBranchModel 输入为两路：
+手工审查后 `round3` 方向：
+- 结果大约在 `Acc 0.7723`
+- `Macro-F1 0.7435`
+- 对 persistent hard silt 有一点作用，但没刷新最佳
 
-- `spectrum`: `(B, 3, 820)`，三通道谱(原谱 + 一阶导 + 二阶导)
-- `window_features`: `(B, D)`，工程特征(D=86)
+第一批物理特征：
+- 结果大约在 `Acc 0.7728`
+- `Macro-F1 0.7418`
+- 砂土更强了一点
+- 粉土反而略退
 
-模型包含三条分支并融合：
+结论：
+- 第一批物理特征不是完全没信息
+- 但没有击中当前主瓶颈
 
-1. Multi-Scale SE-CNN 分支：多尺度卷积核 + SE 注意力，擅长捕获局部峰形/峰宽等局部特征。
-2. Spectral Transformer 分支：对谱段做 patch embedding 后进入 TransformerEncoder，捕获长程关联与跨谱段模式。
-3. MLP 先验分支：直接编码窗口工程特征，补充物理先验、比例关系等可解释信息。
 
-实现位置: `src/model.py`。
+## 十一、误分类归因总结
 
-补充说明：
+### 11.1 persistent 粉土错分现在是什么样
 
-- `nn.TransformerEncoder(enable_nested_tensor=False)`：显式关闭 nested tensor 优化以消除 PyTorch 的兼容性 warning(在 `norm_first=True` 时常见)。
-- AMP 混合精度训练已升级到 `torch.amp.*` 新接口(避免 FutureWarning)。
+现在剩下的顽固粉土错分，已经不是大面积散乱错误，而是集中到少数固定模式：
 
-### 4.2 集成训练系统(train_ensemble.py)
+- 大多集中在 `30s / 60s`
+- 高置信错分
+- 低熵
+- 错分方向稳定：
+  - `粉土 -> 粘土`
+  - `粉土 -> 砂土`
 
-`src/train_ensemble.py` 是主入口，采用两阶段：
+这说明：
+- 它们不是随机波动
+- 不是简单训练不够
+- 很多样本本身就是边界样本、混合样本或非典型粉土
 
-Phase 1: 5-Fold 训练基模型，收集 out-of-fold(OoF) 概率
+### 11.2 人工审查真正解决了什么
 
-- 深度模型：TriBranch CNN 集成(3 个 seed：42/43/44)
-  - 每 fold 内训练 3 个模型
-  - 用 TTA(n=3) 对验证折预测并平均，得到 `oof_cnn (N,3)`
-- 传统 ML 基模型：
-  - GradientBoosting + SMOTE，得到 `oof_gb (N,3)`
-  - XGBoost + SMOTE，得到 `oof_xgb (N,3)`
+人工审查这条线主要解决的是：
+- 中低置信
+- 中等 margin
+- 边界模糊但可修复
+的那部分粉土错分
 
-Phase 2: Stacking 元学习器评估
+而对最顽固的那批 high-confidence hard samples，作用有限。
 
-- 拼接元特征：`meta_X = [oof_cnn, oof_gb, oof_xgb] -> (N, 9)`
-- 使用“独立的 StratifiedKFold 划分”(不同 random_state)做元学习器 CV，降低间接信息通路带来的偏乐观评估风险。
-- 元学习器：XGBoost 分类器
+所以现在的瓶颈已经变成：
 
-### 4.3 torch.compile 策略(Windows 兼容优先)
+**不是继续清洗更多样本，而是要让特征表达更能区分“短时长 + 边界型粉土”。**
 
-由于 Windows 下 `inductor/triton` 后端存在“临时目录清理阶段 WinError 5”等不稳定情况，项目目前将编译后端固定为：
 
-```python
-model = torch.compile(model, backend="aot_eager")
-```
+## 十二、接下来最推荐做什么
 
-特点：
+### 12.1 不建议继续做什么
 
-- 可避免 triton kernel 编译阶段，从而绕开 WinError 5。
-- 有一定加速(通常小于 inductor)，但优先保证可跑通与稳定。
+当前不建议优先做：
 
-涉及文件：
+- 再来一轮大规模 `round4` 样本人工审查
+- 再堆一批类似的全局窗口比值特征
+- 直接做大规模模型架构重写
+- 在没验证局部特征之前，直接切层级策略
 
-- `src/train.py`
-- `src/train_ensemble.py`
-- `src/pretrain_smae.py`
+### 12.2 当前推荐方向
 
----
+当前最合理的下一步是：
 
-## 五、训练评估、日志与可视化产物
+从“全局窗口比值”转向更贴近顽固粉土错分的特征：
 
-### 5.1 训练中可视化(TensorBoard + 训练期混淆矩阵)
+- 净峰-背景分离
+- 局部峰形
+- 短时长噪声鲁棒
 
-- `evaluate.py` 会在验证时计算混淆矩阵，并保存 `experiments/logs/confusion_matrix_epochXXX.png`。
-- TensorBoard 日志写入 `experiments/logs/`，可用：
+### 12.3 最值得先做的 3 个局部 / 鲁棒特征
+
+后续优先考虑这 3 个：
+
+1. `net_peak_snr`
+- 关键思想：`(峰高 - 背景) / 局部噪声`
+- 目的：判断短时长条件下主峰到底靠不靠谱
+
+2. `net_peak_area_fraction`
+- 关键思想：净峰面积占窗口或全谱的比例
+- 目的：把“真实峰强”和“背景抬高”分开
+
+3. `peak_sharpness`
+- 关键思想：看峰顶局部是尖还是钝
+- 目的：抓住边界样本中“整体相似、局部峰形不同”的区别
+
+
+## 十三、为什么当前要从全局物理比值转向局部/鲁棒特征
+
+原理上讲：
+
+- 全局窗口比值更擅长区分“大类差异”
+- 但当前剩下的错误不是大类没分开，而是边界样本细节没分开
+
+现在这些 persistent 粉土错分的本质更像：
+- 峰和背景混在一起
+- 局部峰形不稳定
+- 短时长噪声把粉土特征淹掉了
+
+所以真正需要回答的问题已经不是：
+- “整体上更像哪类”
+
+而是：
+- “关键峰到底清不清楚”
+- “峰和背景能不能分开”
+- “短时长条件下这个峰是否仍可置信”
+
+
+## 十四、AutoDL 5090 训练操作要点
+
+项目目录：
+- `/root/autodl-tmp/gamma/gamma-spectrum-classification`
+
+典型更新流程：
 
 ```bash
-tensorboard --logdir experiments/logs
+cd /root/autodl-tmp/gamma/gamma-spectrum-classification
+git restore configs/config.json
+git restore src/train_ensemble.py
+git pull
+git log -1 --oneline
 ```
 
-### 5.2 训练结束自动产物(新增)
+如果 `git pull` 因网络失败：
+- 直接重试
 
-训练完成后(Phase 2 Stacking 全局指标输出后)，会自动导出以下文件到：
+如果 `git pull` 因本地修改冲突失败：
+- 通常先 `git restore configs/config.json`
+- 需要时再 `git restore src/train_ensemble.py`
+- 然后再 `git pull`
 
-- 默认目录：`experiments/artifacts/`
-- 可配置：`config.json:output.artifact_dir`
-
-产物清单(文件名固定，便于脚本化收集)：
-
-- `stacking_oof_confusion_counts.png`：OOF 混淆矩阵(计数)
-- `stacking_oof_confusion_norm.png`：OOF 混淆矩阵(按真实类别归一化)
-- `stacking_oof_per_class_f1.png`：每类 F1 柱状图
-- `stacking_oof_report.txt`：classification_report 文本版
-- `stacking_oof_metrics.json`：classification_report 的结构化 JSON
-- `stacking_oof_predictions.csv`：每个样本的预测明细(含 `correct` 列，标记预测成功/失败)
-- `stacking_oof_misclassified.csv`：仅误分类样本清单(默认按 margin 从小到大排序，便于定位“最不确定”的错误样本)
-
-Windows 可选“自动弹出”(默认关闭)：
-
-- `config.json:output.auto_open_artifacts = true`
-- 会尝试自动打开混淆矩阵 PNG 与误分类 CSV
-- AutoDL/无 GUI 环境建议保持 `false`
-
-对应实现：`src/artifacts.py`。
-
----
-
-## 六、训练结果汇总(截至 2026-03-10)
-
-### 6.1 历史对比(以 Stacking 为准)
-
-文档早期记录的 Run 1-3 为“旧特征版本”下的结果(见原文档历史)，核心基线是：
-
-- Run 3(2026-03-09)：Stacking 全局 `Acc=0.7613`，Macro-F1 `0.7279`
-
-在落地“优化 1-5(特征工程 + 峰局部对比)”后，最近一次完成训练记录为：
-
-- Run 4(2026-03-10)：Stacking 全局 `Acc=0.7661`，Macro-F1 `0.7313`
-
-结论(现阶段)：特征工程方向是正收益，但离 80% 仍有距离，“粉土”仍是主要瓶颈。
-
-### 6.2 当前痛点复盘
-
-- 粉土样本数量较少，且与粘土在 K/U/Th 相关比例上重叠明显，导致混淆高。
-- Fold 间差异显著，部分 fold 的验证集包含更多边界样本，这是正常现象，不建议为单一 fold 特化。
-
----
-
-## 七、深度分析与后续优化建议(概念层面)
-
-本节不再作为“交接任务清单”，而作为“可选路线图”。已落地项为 1-5。
-
-建议下一阶段仍遵循“先低风险特征工程，再动模型”的原则：
-
-- 优先继续完善特征工程的可解释性与鲁棒性：
-  - 更精细的峰背景估计(局部拟合/更稳健噪声估计)
-  - 结合能窗的物理约束做一致性特征(跨窗比值、对数域约束)
-- 若特征工程接近瓶颈，再考虑中等风险改动：
-  - 数据增强：Manifold Mixup、1D CutMix
-  - 架构微调：跨窗口交叉注意力
-  - 预训练策略：SupCon 监督对比预训练
-
----
-
-## 八、实施注意事项与常见问题排查
-
-### 8.1 Windows 运行注意事项
-
-- `python.exe src/train_ensemble.py` 报 `No module named 'torch'`：
-  - 说明当前终端的 `python.exe` 不是 conda 环境里的 Python。
-  - 用 `where python` 确认路径；或先 `conda activate xsypytorch` 再运行 `python src/train_ensemble.py`。
-- `num_workers > 0` 在 Windows 上可能卡住或不稳定：保持 `config.json:training.num_workers=0`。
-
-### 8.2 torch.compile 相关
-
-- Windows 下 `inductor/triton` 后端不稳定时，优先使用 `backend="aot_eager"`(当前已固定)。
-- 如果仍遇到编译阶段异常，可临时将 `config.json:training.use_compile=false`，以稳定训练为第一目标。
-
-### 8.3 XGBoost 相关
-
-- 云端镜像缺少 `xgboost` 时，会在导入阶段报错：
-  - `pip install xgboost`
-
-### 8.4 版本管理(Git)建议
-
-为了避免“本地代码已改但忘记同步”“训练用的代码版本对不上”等问题，建议养成固定习惯：
-
-- 每次完成一项代码修改后，立刻提交一次 git commit（保持提交粒度小、信息明确）。
-- 在开始一次耗时训练前，确保工作区干净并已提交（这样日志对应的代码版本可追溯）。
-
-常用命令(项目根目录执行)：
+服务器训练前常用配置改写：
 
 ```bash
-git status
-git add -A
-git commit -m "描述你这次改动的要点"
-git push origin main
+sed -i 's#"train_dir": "E:/data/xunlian"#"train_dir": "/root/autodl-tmp/gamma/gamma_data/xunlian"#' configs/config.json
+sed -i 's#"val_dir": "E:/data/yanzheng"#"val_dir": "/root/autodl-tmp/gamma/gamma_data/yanzheng"#' configs/config.json
+sed -E -i 's/"batch_size": *[0-9]+/"batch_size": 512/' configs/config.json
+sed -E -i 's/"num_workers": *[0-9]+/"num_workers": 16/' configs/config.json
 ```
 
----
-
-## 九、如何运行(本地/云端)
-
-### 9.1 本地 Windows(推荐最简流程)
-
-1. 激活环境：
-
-```bash
-conda activate xsypytorch
-```
-
-2. 运行训练：
+训练命令：
 
 ```bash
 python -u src/train_ensemble.py
 ```
 
-3. 查看日志：
 
-- 主日志：`experiments/logs/train_ensemble_v2.log`
-- 训练结束产物：`experiments/artifacts/`
+## 十五、当前接手时最短摘要
 
-### 9.2 AutoDL/云端(建议用于加速迭代)
+如果新的开发者只看一段话，应该看这一段：
 
-1. 租用 GPU 节点后，在终端执行：
+- 当前主线已经稳定
+- 当前最佳仍是人工审查增强后的老版本，不是最新那版物理比值特征
+- 大规模继续人工审查已经不划算
+- 第一批新物理特征没有击中粉土主瓶颈
+- 接下来最值得做的是：
+  - 净峰-背景分离
+  - 局部峰形
+  - 短时长噪声鲁棒
 
-```bash
-cd /root
-git clone https://github.com/CDUTAKL/gamma-spectrum-classification.git
-cd gamma-spectrum-classification
-```
-
-2. 安装依赖：
-
-```bash
-pip install -r requirements.txt
-pip install xgboost
-```
-
-3. 上传数据到云端目录(建议直接上传文件夹而非 zip)：
-
-- 目标结构建议为：
-  - `/root/gamma-spectrum-classification/data/xunlian`
-  - `/root/gamma-spectrum-classification/data/yanzheng`
-
-4. 修改 `configs/config.json` 的数据路径：
-
-```json
-{
-  "data": {
-    "train_dir": "/root/gamma-spectrum-classification/data/xunlian",
-    "val_dir": "/root/gamma-spectrum-classification/data/yanzheng"
-  }
-}
-```
-
-5. 后台启动训练并写日志：
-
-```bash
-nohup python -u src/train_ensemble.py > train_output.log 2>&1 &
-tail -f train_output.log
-```
-
-6. 训练完成后下载结果：
-
-- 产物目录：`experiments/artifacts/`
-- 也可下载 `experiments/logs/` 用于 TensorBoard 回放
-
----
-
-## 十、关键文件速查
-
-| 需求 | 文件 | 说明 |
-|---|---|---|
-| 数据解析/特征工程主逻辑 | [src/dataset.py](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/dataset.py) | SG 导数、对数比值、小波能量、PCA、峰局部对比等均在这里 |
-| 集成训练主入口 | [src/train_ensemble.py](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/train_ensemble.py) | Phase1 OoF + Phase2 stacking；训练结束导出 artifacts |
-| 单模型训练循环 | [src/train.py](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/train.py) | AMP、scheduler、早停、SWA 等 |
-| 模型结构 | [src/model.py](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/model.py) | TriBranch、Transformer(enable_nested_tensor=False) |
-| 训练期评估/混淆矩阵 | [src/evaluate.py](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/evaluate.py) | 每 epoch 评估与混淆矩阵绘图 |
-| 训练结束可视化/清单导出 | [src/artifacts.py](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/artifacts.py) | 导出“预测成功/失败”清单与图表 |
-| 全局配置 | [configs/config.json](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/configs/config.json) | `window_feature_dim=86`、artifact_dir 等 |
+这就是当前项目的真实状态。
