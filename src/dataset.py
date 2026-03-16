@@ -168,88 +168,6 @@ def _extract_peak_local_contrast_features(window_data: np.ndarray) -> list:
     return [float(peak_ratio), float(peak_snr), float(peak_offset), float(peak_focus)]
 
 
-def _estimate_window_background_level(window_data: np.ndarray) -> float:
-    """Estimate a simple local background level from both window edges."""
-    n = int(len(window_data))
-    if n == 0:
-        return 0.0
-    edge = max(2, n // 8)
-    left = window_data[:edge]
-    right = window_data[-edge:]
-    bg_samples = np.concatenate([left, right], axis=0)
-    return float(np.median(bg_samples))
-
-
-def _estimate_window_net_area(window_data: np.ndarray) -> float:
-    """Approximate net peak area after subtracting a flat local background."""
-    bg_level = _estimate_window_background_level(window_data)
-    net = float(np.maximum(window_data - bg_level, 0.0).sum())
-    return net
-
-
-def _extract_window_robust_peak_features(window_data: np.ndarray) -> list:
-    """Extract robust local peak descriptors from one energy window.
-
-    The current hard samples in this project are mostly short-duration spectra
-    where the peak is weak, the background is relatively high, or the peak
-    shape is not stable enough. These three features focus on that local
-    structure instead of global composition only.
-
-    Returns, in order:
-      1) net_peak_snr
-      2) net_peak_area_fraction
-      3) peak_sharpness
-    """
-    eps = 1e-10
-    n = int(len(window_data))
-    if n == 0:
-        return [0.0, 0.0, 0.0]
-
-    window_sum = float(window_data.sum())
-    peak_idx = int(np.argmax(window_data))
-    peak_height = float(window_data[peak_idx])
-    if peak_height <= 0.0 or window_sum <= 0.0:
-        return [0.0, 0.0, 0.0]
-
-    core_radius = max(1, n // 16)
-    shoulder_radius = max(core_radius + 1, n // 8)
-
-    core_lo = max(0, peak_idx - core_radius)
-    core_hi = min(n, peak_idx + core_radius + 1)
-    core = window_data[core_lo:core_hi]
-    core_mean = float(core.mean()) if len(core) > 0 else peak_height
-
-    left_shoulder = window_data[max(0, peak_idx - shoulder_radius):core_lo]
-    right_shoulder = window_data[core_hi:min(n, peak_idx + shoulder_radius + 1)]
-    shoulder_parts = [part for part in (left_shoulder, right_shoulder) if len(part) > 0]
-    shoulder_samples = (
-        np.concatenate(shoulder_parts, axis=0) if shoulder_parts else window_data
-    )
-
-    local_bg = float(np.median(shoulder_samples))
-    bg_mad = float(np.median(np.abs(shoulder_samples - local_bg)))
-    local_noise = 1.4826 * bg_mad
-    if local_noise < 1e-8:
-        local_noise = float(shoulder_samples.std())
-    if local_noise < 1e-8:
-        local_noise = 1.0
-
-    net_peak_height = max(peak_height - local_bg, 0.0)
-    net_peak_snr = net_peak_height / (local_noise + eps)
-
-    net_area = float(np.maximum(window_data - local_bg, 0.0).sum())
-    net_peak_area_fraction = net_area / (window_sum + eps)
-
-    shoulder_mean = float(shoulder_samples.mean()) if len(shoulder_samples) > 0 else local_bg
-    peak_sharpness = max(core_mean - shoulder_mean, 0.0) / (core_mean + eps)
-
-    return [
-        float(net_peak_snr),
-        float(net_peak_area_fraction),
-        float(peak_sharpness),
-    ]
-
-
 def extract_wavelet_energy_features(
     cps_spectrum: np.ndarray,
     wavelet: str = WAVELET_NAME,
@@ -325,7 +243,7 @@ def transform_pca_scores(cps_spectrum: np.ndarray, pca_stats: dict) -> np.ndarra
 
 def extract_energy_window_features(cps_spectrum: np.ndarray, energy_windows: dict,
                                     measure_time: float = None) -> np.ndarray:
-    """从 CPS 谱提取 77 维通用工程特征（不含 PCA 得分）。
+    """从 CPS 谱提取 71 维通用工程特征（不含 PCA 得分）。
 
     特征分组:
       [0:10]   基础能窗特征: K/U/Th CPS, 总 CPS, 各窗口占比和比值
@@ -335,9 +253,8 @@ def extract_energy_window_features(cps_spectrum: np.ndarray, energy_windows: dic
       [37:38]  测量时间
       [38:46]  物理判别特征: Th/K, Th/U, Compton, 低能区, 谱质心, 谱熵
       [46:60]  领域增强特征 (新增): 三元坐标, 窗口偏度/峰度, 滚动波动率, Compton 斜率
-      [61:66]  新增粉土增强物理特征: 净峰比值 / Compton 曲率 / 主峰净面积占比
-      [66:71]  对数比值特征: log-ratio 变换后的非线性判别关系
-      [71:77]  小波能量特征: 多尺度子带能量占比
+      [60:65]  对数比值特征: log-ratio 变换后的非线性判别关系
+      [65:71]  小波能量特征: 多尺度子带能量占比
     """
     k_range = energy_windows["K"]
     u_range = energy_windows["U"]
@@ -351,10 +268,6 @@ def extract_energy_window_features(cps_spectrum: np.ndarray, energy_windows: dic
     u_cps = u_data.sum()
     th_cps = th_data.sum()
     total_cps = cps_spectrum[:820].sum()
-
-    net_k_cps = _estimate_window_net_area(k_data)
-    net_u_cps = _estimate_window_net_area(u_data)
-    net_th_cps = _estimate_window_net_area(th_data)
 
     eps = 1e-10
     # 基础能窗特征 (10维)
@@ -500,34 +413,6 @@ def extract_energy_window_features(cps_spectrum: np.ndarray, energy_windows: dic
         high_slope = 0.0
     features.append(high_slope)
 
-    # ---- 新增粉土增强物理特征 (5维) ----
-    # 1) 净峰面积比值：主峰区先减去局部背景，再做 K/Th、Th/U、K/U 比值。
-    features.append(float(net_k_cps / (net_th_cps + eps)))
-    features.append(float(net_th_cps / (net_u_cps + eps)))
-    features.append(float(net_k_cps / (net_u_cps + eps)))
-
-    # 2) Compton 区曲率：高能散射背景的二次项，补充已有 slope 的一阶趋势信息。
-    if len(compton_region) > 2:
-        x_compton_centered = x_compton - x_compton.mean()
-        compton_curvature = float(
-            np.polyfit(x_compton_centered, compton_region.astype(np.float64), deg=2)[0]
-        )
-    else:
-        compton_curvature = 0.0
-    features.append(compton_curvature)
-
-    # 3) 主峰净面积占比：三个主峰净面积在全谱中的占比，刻画“峰 vs 背景”强弱。
-    net_peak_fraction = float((net_k_cps + net_u_cps + net_th_cps) / (total_cps + eps))
-    features.append(net_peak_fraction)
-
-    # ---- 局部 / 鲁棒峰特征 (9维) ----
-    # 针对 persistent 粉土错分最常见的三类问题补充局部信息：
-    #   - 峰是否显著高于附近背景和噪声
-    #   - 窗口能量里有多少是真正的净峰而不是整体背景抬升
-    #   - 峰芯是否足够尖锐、稳定，而不是宽而平的缓慢抬升
-    for window_data in [k_data, u_data, th_data]:
-        features.extend(_extract_window_robust_peak_features(window_data))
-
     # ---- 对数比值特征 (5维) ----
     # log(Th/K): 放大 Th 与 K 之间的成分差异
     features.append(float(np.log(th_cps / (k_cps + eps) + eps)))
@@ -563,7 +448,7 @@ def extract_engineered_features(
         feature_stats: 训练集统计量；若包含 PCA 参数则追加 PCA 得分
 
     Returns:
-        不含 PCA 时返回 77 维，含 PCA 时返回 92 维
+        不含 PCA 时返回 71 维，含 PCA 时返回 86 维
     """
     base_features = extract_energy_window_features(
         cps_spectrum, energy_windows, measure_time
@@ -818,7 +703,7 @@ class GammaSpectrumDataset(Dataset):
     def _build_val_cache(self):
         """为验证集构建完整输出缓存（仅 is_train=False 且非TTA时有效）。
 
-        缓存内容：标准化后的 spectrum(3,820) 和 window_features(config.model.window_feature_dim,)。
+        缓存内容：标准化后的 spectrum(3,820) 和 window_features(86,)。
         这些在验证模式下是完全确定性的，无需每个epoch重复计算。
         """
         if self._val_cache_built or self.is_train:
