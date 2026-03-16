@@ -34,7 +34,7 @@
         "se_reduction": 4,
         "fc_dims": [128],
         "dropouts": [0.3],
-        "window_feature_dim": 92,
+        "window_feature_dim": 101,
         "window_hidden_dim": 64,
         "use_transformer_branch": false,
         "transformer": {

@@ -187,6 +187,69 @@ def _estimate_window_net_area(window_data: np.ndarray) -> float:
     return net
 
 
+def _extract_window_robust_peak_features(window_data: np.ndarray) -> list:
+    """Extract robust local peak descriptors from one energy window.
+
+    The current hard samples in this project are mostly short-duration spectra
+    where the peak is weak, the background is relatively high, or the peak
+    shape is not stable enough. These three features focus on that local
+    structure instead of global composition only.
+
+    Returns, in order:
+      1) net_peak_snr
+      2) net_peak_area_fraction
+      3) peak_sharpness
+    """
+    eps = 1e-10
+    n = int(len(window_data))
+    if n == 0:
+        return [0.0, 0.0, 0.0]
+
+    window_sum = float(window_data.sum())
+    peak_idx = int(np.argmax(window_data))
+    peak_height = float(window_data[peak_idx])
+    if peak_height <= 0.0 or window_sum <= 0.0:
+        return [0.0, 0.0, 0.0]
+
+    core_radius = max(1, n // 16)
+    shoulder_radius = max(core_radius + 1, n // 8)
+
+    core_lo = max(0, peak_idx - core_radius)
+    core_hi = min(n, peak_idx + core_radius + 1)
+    core = window_data[core_lo:core_hi]
+    core_mean = float(core.mean()) if len(core) > 0 else peak_height
+
+    left_shoulder = window_data[max(0, peak_idx - shoulder_radius):core_lo]
+    right_shoulder = window_data[core_hi:min(n, peak_idx + shoulder_radius + 1)]
+    shoulder_parts = [part for part in (left_shoulder, right_shoulder) if len(part) > 0]
+    shoulder_samples = (
+        np.concatenate(shoulder_parts, axis=0) if shoulder_parts else window_data
+    )
+
+    local_bg = float(np.median(shoulder_samples))
+    bg_mad = float(np.median(np.abs(shoulder_samples - local_bg)))
+    local_noise = 1.4826 * bg_mad
+    if local_noise < 1e-8:
+        local_noise = float(shoulder_samples.std())
+    if local_noise < 1e-8:
+        local_noise = 1.0
+
+    net_peak_height = max(peak_height - local_bg, 0.0)
+    net_peak_snr = net_peak_height / (local_noise + eps)
+
+    net_area = float(np.maximum(window_data - local_bg, 0.0).sum())
+    net_peak_area_fraction = net_area / (window_sum + eps)
+
+    shoulder_mean = float(shoulder_samples.mean()) if len(shoulder_samples) > 0 else local_bg
+    peak_sharpness = max(core_mean - shoulder_mean, 0.0) / (core_mean + eps)
+
+    return [
+        float(net_peak_snr),
+        float(net_peak_area_fraction),
+        float(peak_sharpness),
+    ]
+
+
 def extract_wavelet_energy_features(
     cps_spectrum: np.ndarray,
     wavelet: str = WAVELET_NAME,
@@ -456,6 +519,14 @@ def extract_energy_window_features(cps_spectrum: np.ndarray, energy_windows: dic
     # 3) 主峰净面积占比：三个主峰净面积在全谱中的占比，刻画“峰 vs 背景”强弱。
     net_peak_fraction = float((net_k_cps + net_u_cps + net_th_cps) / (total_cps + eps))
     features.append(net_peak_fraction)
+
+    # ---- 局部 / 鲁棒峰特征 (9维) ----
+    # 针对 persistent 粉土错分最常见的三类问题补充局部信息：
+    #   - 峰是否显著高于附近背景和噪声
+    #   - 窗口能量里有多少是真正的净峰而不是整体背景抬升
+    #   - 峰芯是否足够尖锐、稳定，而不是宽而平的缓慢抬升
+    for window_data in [k_data, u_data, th_data]:
+        features.extend(_extract_window_robust_peak_features(window_data))
 
     # ---- 对数比值特征 (5维) ----
     # log(Th/K): 放大 Th 与 K 之间的成分差异
