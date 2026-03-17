@@ -787,6 +787,100 @@ def build_meta_features(
     return np.hstack(parts).astype(np.float32)
 
 
+def _build_meta_classifier(meta_learner: str, seed: int):
+    """Create the Phase 2 meta-classifier.
+
+    The hierarchical strategy reuses exactly the same classifier family in both
+    stages so that the architectural change stays focused on the decision
+    structure instead of introducing extra confounders.
+    """
+    meta_learner = (meta_learner or "xgb").lower()
+    if meta_learner == "logreg":
+        from sklearn.linear_model import LogisticRegression
+
+        return LogisticRegression(
+            solver="lbfgs",
+            C=0.5,
+            max_iter=1000,
+            n_jobs=1,
+        )
+
+    return XGBClassifier(
+        n_estimators=100,
+        max_depth=3,
+        learning_rate=0.1,
+        min_child_weight=3,
+        subsample=0.8,
+        eval_metric="mlogloss",
+        random_state=seed,
+    )
+
+
+def _predict_hierarchical_meta(
+    meta_X_train: np.ndarray,
+    y_train: np.ndarray,
+    meta_X_val: np.ndarray,
+    class_names: list[str],
+    meta_learner: str,
+    seed: int,
+) -> tuple[np.ndarray, dict]:
+    """Two-stage hierarchical meta classification for 3-class output.
+
+    Stage 1:
+      silt vs non-silt
+
+    Stage 2:
+      within non-silt, clay vs sand
+
+    Returns:
+      - probs: (N, 3) final class probabilities in the original class order
+      - diagnostics: binary-stage validation summaries for logging
+    """
+    y_train = np.asarray(y_train, dtype=np.int64)
+    C = len(class_names)
+    if C != 3:
+        raise ValueError(f"hierarchical strategy only supports 3 classes, got {C}")
+
+    silt_idx = 2
+    non_silt_classes = [idx for idx in range(C) if idx != silt_idx]
+    if len(non_silt_classes) != 2:
+        raise ValueError("hierarchical strategy expects exactly two non-silt classes")
+
+    stage1_train = (y_train == silt_idx).astype(np.int64)
+    stage1_clf = _build_meta_classifier(meta_learner, seed)
+    stage1_clf.fit(meta_X_train, stage1_train)
+    stage1_proba = stage1_clf.predict_proba(meta_X_val).astype(np.float64)
+    p_silt = stage1_proba[:, 1]
+    p_non_silt = stage1_proba[:, 0]
+
+    stage2_mask = y_train != silt_idx
+    if stage2_mask.sum() == 0:
+        raise ValueError("stage2 training set is empty after excluding silt")
+
+    stage2_train = (y_train[stage2_mask] == non_silt_classes[1]).astype(np.int64)
+    if np.unique(stage2_train).size < 2:
+        raise ValueError("stage2 training labels must contain both non-silt classes")
+
+    stage2_clf = _build_meta_classifier(meta_learner, seed + 17)
+    stage2_clf.fit(meta_X_train[stage2_mask], stage2_train)
+    stage2_proba = stage2_clf.predict_proba(meta_X_val).astype(np.float64)
+
+    probs = np.zeros((meta_X_val.shape[0], C), dtype=np.float64)
+    probs[:, silt_idx] = p_silt
+    probs[:, non_silt_classes[0]] = p_non_silt * stage2_proba[:, 0]
+    probs[:, non_silt_classes[1]] = p_non_silt * stage2_proba[:, 1]
+
+    probs = np.clip(probs, 1e-12, 1.0)
+    probs = probs / probs.sum(axis=1, keepdims=True)
+
+    diagnostics = {
+        "stage1_positive_name": class_names[silt_idx],
+        "stage2_negative_name": class_names[non_silt_classes[0]],
+        "stage2_positive_name": class_names[non_silt_classes[1]],
+    }
+    return probs, diagnostics
+
+
 def extract_ml_features(file_paths, measure_times,
                         energy_windows, spectrum_length,
                         feature_stats=None):
@@ -883,7 +977,10 @@ def run_phase2_stacking(
 
     # 选择 stacking 元学习器类型（默认 XGB，可切换为 logreg 等）
     stacking_cfg = config.get("stacking", {})
+    stacking_strategy = stacking_cfg.get("strategy", "flat").lower()
     meta_learner = stacking_cfg.get("meta_learner", "xgb").lower()
+    logger.info(f"  元学习策略: {stacking_strategy}")
+    logger.info(f"  元学习器类型: {meta_learner}")
 
     stack_preds = np.zeros(N, dtype=np.int64)
     stack_probs = np.zeros((N, C), dtype=np.float64)
@@ -960,6 +1057,179 @@ def run_phase2_stacking(
         oof_true, stack_preds, average="macro", zero_division=0
     )
     logger.info(f"\n  Stacking 全局: Acc={global_acc:.4f}  F1={global_f1:.4f}")
+
+    output_cfg = config.get("output", {})
+    artifact_dir = _build_phase2_artifact_dir(config, meta_mode, phase2_only)
+    auto_open = bool(output_cfg.get("auto_open_artifacts", False))
+    save_stacking_oof_artifacts(
+        artifact_dir=artifact_dir,
+        file_paths=all_fps.tolist(),
+        measure_times=all_mts.tolist(),
+        y_true=oof_true,
+        y_pred=stack_preds,
+        y_prob=stack_probs,
+        class_names=class_names,
+        meta_fold=meta_fold_id,
+        auto_open=auto_open,
+        logger=logger,
+    )
+    logger.info(f"{'=' * 60}")
+    logger.info("训练完成。")
+
+    return {
+        "global_acc": float(global_acc),
+        "global_f1": float(global_f1),
+        "artifact_dir": artifact_dir,
+        "meta_mode": meta_mode,
+        "fold_stack_acc": fold_stack_acc,
+    }
+
+
+def run_phase2_stacking_strategy(
+    *,
+    config: dict,
+    logger,
+    class_names: list[str],
+    all_fps: np.ndarray,
+    all_mts: np.ndarray,
+    stratify_key: np.ndarray,
+    oof_cnn: np.ndarray,
+    oof_gb: np.ndarray,
+    oof_xgb: np.ndarray,
+    oof_true: np.ndarray,
+    fold_cnn_acc: list,
+    fold_gb_acc: list,
+    fold_xgb_acc: list,
+    fold_fixed_acc: list,
+    n_splits: int,
+    seed: int,
+    meta_mode: str,
+    phase2_only: bool,
+) -> dict:
+    """Phase 2 wrapper with optional hierarchical stacking strategy."""
+    stacking_cfg = config.get("stacking", {})
+    stacking_strategy = stacking_cfg.get("strategy", "flat").lower()
+    if stacking_strategy != "hierarchical":
+        return run_phase2_stacking(
+            config=config,
+            logger=logger,
+            class_names=class_names,
+            all_fps=all_fps,
+            all_mts=all_mts,
+            stratify_key=stratify_key,
+            oof_cnn=oof_cnn,
+            oof_gb=oof_gb,
+            oof_xgb=oof_xgb,
+            oof_true=oof_true,
+            fold_cnn_acc=fold_cnn_acc,
+            fold_gb_acc=fold_gb_acc,
+            fold_xgb_acc=fold_xgb_acc,
+            fold_fixed_acc=fold_fixed_acc,
+            n_splits=n_splits,
+            seed=seed,
+            meta_mode=meta_mode,
+            phase2_only=phase2_only,
+        )
+
+    N = len(oof_true)
+    C = config["data"]["num_classes"]
+    if C != 3:
+        raise ValueError(f"hierarchical strategy only supports 3 classes, got {C}")
+
+    logger.info(f"\n{'=' * 60}")
+    logger.info("Phase 2: Hierarchical Stacking 元学习器")
+    logger.info(f"{'=' * 60}")
+
+    meta_X = build_meta_features(
+        oof_cnn=oof_cnn,
+        oof_gb=oof_gb,
+        oof_xgb=oof_xgb,
+        measure_times=all_mts,
+        mode=str(meta_mode),
+    )
+    logger.info(f"  元特征模式: {meta_mode}")
+    logger.info(f"  元特征维度: {meta_X.shape}")
+
+    meta_learner = stacking_cfg.get("meta_learner", "xgb").lower()
+    logger.info(f"  元学习策略: {stacking_strategy}")
+    logger.info(f"  元学习器类型: {meta_learner}")
+
+    meta_skf = StratifiedKFold(
+        n_splits=n_splits,
+        shuffle=True,
+        random_state=seed + 100,
+    )
+
+    stack_preds = np.zeros(N, dtype=np.int64)
+    stack_probs = np.zeros((N, C), dtype=np.float64)
+    meta_fold_id = np.zeros(N, dtype=np.int64)
+    fold_stack_acc = []
+
+    for fold_idx, (train_idx, val_idx) in enumerate(
+        meta_skf.split(all_fps, stratify_key)
+    ):
+        fold = fold_idx + 1
+        fold_proba, diagnostics = _predict_hierarchical_meta(
+            meta_X_train=meta_X[train_idx],
+            y_train=oof_true[train_idx],
+            meta_X_val=meta_X[val_idx],
+            class_names=class_names,
+            meta_learner=meta_learner,
+            seed=seed + fold,
+        )
+        fold_preds = fold_proba.argmax(axis=1)
+
+        stack_preds[val_idx] = fold_preds
+        stack_probs[val_idx] = fold_proba
+        meta_fold_id[val_idx] = fold
+
+        fold_acc = accuracy_score(oof_true[val_idx], fold_preds)
+        fold_f1 = f1_score(
+            oof_true[val_idx], fold_preds,
+            average="macro", zero_division=0,
+        )
+        fold_stack_acc.append(fold_acc)
+
+        logger.info(
+            "  Fold %d hierarchical: Stage1 %s vs 非%s, Stage2 %s vs %s",
+            fold,
+            diagnostics["stage1_positive_name"],
+            diagnostics["stage1_positive_name"],
+            diagnostics["stage2_negative_name"],
+            diagnostics["stage2_positive_name"],
+        )
+        logger.info(f"  Fold {fold}: Acc={fold_acc:.4f}  F1={fold_f1:.4f}")
+        logger.info(
+            f"\n{classification_report(oof_true[val_idx], fold_preds, target_names=class_names, zero_division=0)}"
+        )
+
+    logger.info(f"\n{'=' * 60}")
+    logger.info("最终结果对比")
+    logger.info(f"{'=' * 60}")
+
+    results = {
+        "CNN 集成+TTA": fold_cnn_acc,
+        "GradientBoosting": fold_gb_acc,
+        "XGBoost": fold_xgb_acc,
+        "固定权重融合": fold_fixed_acc,
+        "Hierarchical Stacking": fold_stack_acc,
+    }
+
+    for name, accs in results.items():
+        if not accs:
+            continue
+        avg = np.mean(accs)
+        std = np.std(accs)
+        per_fold = "  ".join([f"F{i+1}={a:.4f}" for i, a in enumerate(accs)])
+        logger.info(f"  {name}:")
+        logger.info(f"    {per_fold}")
+        logger.info(f"    平均: {avg:.4f} +/- {std:.4f}")
+
+    global_acc = accuracy_score(oof_true, stack_preds)
+    global_f1 = f1_score(
+        oof_true, stack_preds, average="macro", zero_division=0
+    )
+    logger.info(f"\n  Hierarchical Stacking 全局: Acc={global_acc:.4f}  F1={global_f1:.4f}")
 
     output_cfg = config.get("output", {})
     artifact_dir = _build_phase2_artifact_dir(config, meta_mode, phase2_only)
@@ -1276,7 +1546,7 @@ def main():
         phase2_seed = config["training"]["seed"]
             
 
-    run_phase2_stacking(
+    run_phase2_stacking_strategy(
         config=config,
         logger=logger,
         class_names=class_names,

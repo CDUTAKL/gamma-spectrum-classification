@@ -74,6 +74,7 @@
         "use_amp": false
     },
     "stacking": {
+        "strategy": "hierarchical",
         "meta_features": "proba+uncertainty",
         "meta_learner": "logreg"
     },
