@@ -1,368 +1,374 @@
-# 伽马能谱土壤分类项目说明与交接文档
+# 伽马能谱土壤分类项目交接文档
+> 文档类型：持续交接 / 当前状态快照  
+> 仓库地址：`https://github.com/CDUTAKL/gamma-spectrum-classification`  
+> 最近重写时间：2026-03-18  
+> 当前代码基线：`dd2ca40 fix: suppress plot glyph warnings in artifacts`
 
-> 文档类型：项目现状说明 / 持续交接文档
->
-> 仓库地址：`https://github.com/CDUTAKL/gamma-spectrum-classification`
->
-> 最近重写时间：2026-03-13
->
-> 重写时本地分支提交：`352a3d8 feat: add physics-guided silt features`
+## 1. 项目一句话概述
+这是一个基于伽马能谱 `.txt` 文件做三分类土壤识别的项目，类别为：
 
-## 一、项目当前处于什么阶段
+- `0 = 粘土`
+- `1 = 砂土`
+- `2 = 粉土`
 
-这个项目已经不再是早期“搭框架”阶段，而是进入了：
+主入口是 [`src/train_ensemble.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/train_ensemble.py)，主流程是：
 
-- 主流程稳定可训练
-- 已做过多轮完整实验
-- 已完成误分类驱动的人工审查与软处理
-- 当前主要矛盾聚焦在“粉土”与“粘土/砂土”的边界样本
-- 后续优化重点应转向更贴近顽固粉土错分的特征设计
+- TriBranch CNN 集成
+- GradientBoosting
+- XGBoost
+- Phase 2 stacking / hierarchical stacking
 
-一句话概括当前状态：
+当前真正的难点不是“模型能不能训起来”，而是：
 
-**模型框架已经成型，当前瓶颈不是能不能训练，而是如何把 persistent 粉土错分进一步压下去。**
+- 如何稳定提升 `粉土` 这一 hardest class 的识别能力
+- 如何在不明显牺牲总 `Acc` 的情况下提升 `Macro-F1`
 
 
-## 二、任务定义
+## 2. 当前项目所处阶段
+项目已经不在“搭框架”阶段，而在“高平台期精修”阶段。
 
-输入：
-- 每个样本为一个 `.txt` 文件
-- 含 820 个通道的伽马能谱计数
+已经完成的关键基础设施：
+
+- OOF cache
+- `Phase2-only`
+- artifacts 产物导出
+- AutoDL / 5090 训练流程
+- 本地 GTX 1650 稳定性修复
+- 错误样本人工审查与样本级降权
+- hierarchical stacking（方案 A）
+- hierarchical Stage 1 阈值决策
+
+当前状态可以概括为：
+
+**flat baseline 已稳定；hierarchical 方向已证明有效；当前最值得继续验证的是 hierarchical + tuned threshold。**
+
+
+## 3. 数据与评估口径
+### 3.1 输入
+- 每个样本是一个 `.txt`
+- 每个样本包含 `820` 通道计数
 - 每个样本带测量时长：`30s / 60s / 120s / 150s`
 
-输出：
-- 三分类土壤标签
-  - `0`: 粘土
-  - `1`: 砂土
-  - `2`: 粉土
+### 3.2 本地路径
+- 训练：`E:/data/xunlian`
+- 验证：`E:/data/yanzheng`
 
-目标：
-- `Stacking Acc >= 0.80`
+### 3.3 AutoDL 路径
+- 训练：`/root/autodl-tmp/gamma/gamma_data/xunlian`
+- 验证：`/root/autodl-tmp/gamma/gamma_data/yanzheng`
 
-当前实际情况：
-- 最强结果仍在 `0.776` 左右
-- 粉土仍是主瓶颈
+### 3.4 评估口径
+完整训练时会合并 `train_dir + val_dir`，使用 `StratifiedKFold` 做 OOF。
+
+固定观察结论：
+
+- `30s` 一直最难
+- `60s` 次难
+- `120s / 150s` 明显更稳
+
+所以当前真正拖后腿的是：
+
+- 短时长
+- 粉土边界样本
 
 
-## 三、当前主入口与核心文件
-
-主入口：
+## 4. 当前关键文件
 - [`src/train_ensemble.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/train_ensemble.py)
-
-关键文件：
+  - 主训练入口
+  - Phase 1 / Phase 2
+  - flat stacking 与 hierarchical stacking
+  - Stage 1 threshold 决策逻辑
 
 - [`configs/config.json`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/configs/config.json)
-  - 训练、模型、特征、stacking 配置
+  - 当前主配置
 
 - [`src/dataset.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/dataset.py)
   - 文件解析
-  - 数据增强
-  - 工程特征提取
-  - PCA 统计
-  - `sample_weight` 样本级降权逻辑
-
-- [`src/model.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/model.py)
-  - TriBranch 模型定义
-  - transformer 分支可通过配置关闭
+  - 特征提取
+  - 样本级权重
+  - DataLoader 构建
 
 - [`src/train.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/train.py)
-  - 单模型训练工具函数
+  - CNN 单模型训练循环
+
+- [`src/evaluate.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/evaluate.py)
+  - 验证指标
+  - TensorBoard confusion matrix 绘图
 
 - [`src/artifacts.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/src/artifacts.py)
-  - 训练后产物导出
-  - 混淆矩阵、F1 图、预测明细、误分类清单
-
-- [`plot_noisy_silt.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/plot_noisy_silt.py)
-  - 本地人工审查 hard silt 样本时的辅助出图脚本
-  - 注意：这个文件当前本地还有未提交修改
+  - 完整训练后 metrics / confusion / per-class F1 / misclassified 导出
 
 - [`experiments/artifacts/`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts)
-  - 完整训练产物
-  - OOF cache
-  - 人工审查 CSV
+  - 所有完整训练与 `Phase2-only` 产物
+
+- [`plot_noisy_silt.py`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/plot_noisy_silt.py)
+  - 人工审查 hard silt 样本用图脚本
+  - 注意：此文件当前本地仍有未提交修改，不要误带入别的提交
 
 
-## 四、数据路径与评估口径
+## 5. 当前配置快照
+当前 [`configs/config.json`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/configs/config.json) 关键项：
 
-本地默认路径：
-- `E:/data/xunlian`
-- `E:/data/yanzheng`
-
-AutoDL 路径：
-- `/root/autodl-tmp/gamma/gamma_data/xunlian`
-- `/root/autodl-tmp/gamma/gamma_data/yanzheng`
-
-评估规则：
-- 训练时会合并 `train_dir + val_dir`
-- 用 `StratifiedKFold`
-- 同时考虑测量时长分层
-- 固定 `seed = 42`
-
-稳定观察结论：
-- `30s` 一直最难
-- `60s` 次难
-- `120s / 150s` 明显更稳定
-
-
-## 五、当前模型与训练配置
-
-当前配置文件中的关键设置：
-
-- `window_feature_dim = 92`
+- `window_feature_dim = 87`
 - `use_transformer_branch = false`
-- `loss_type = focal`
-- `focal_gamma = 2.0`
-- `focal_alpha = [1.0, 0.5, 2.0]`
+- `batch_size = 32`
+- `num_workers = 0`
 - `meta_features = proba+uncertainty`
 - `meta_learner = logreg`
+- `strategy = hierarchical`
+- `stage1_decision = threshold`
+- `silt_threshold = 0.43`
 
-本地常用：
-- `num_workers = 0`
+这意味着：
 
-5090 常用：
-- `batch_size = 512`
-- `num_workers = 16`
-
-编译与 AMP：
-- `torch.compile(..., backend="aot_eager")`
-- `train_ensemble.py` 已加入有限重试与 finite 检查，主要用于防 GTX 1650 本地异常
+- 当前本地主线不是 flat，而是 hierarchical
+- 当前默认阈值已经不是 `0.50`，而是 `0.43`
 
 
-## 六、当前特征工程状态
+## 6. 已做过且已经证伪 / 收益递减的方向
+### 6.1 已确认有效，但收益已接近上限
+- `round2` 人工审查 + sample_weight 软处理
 
-### 6.1 已经有的特征
+这是历史上最有价值的一次精修，直接提升了主线质量。
 
-当前已经落地的特征包括：
+### 6.2 已进入收益递减
+- `round3` 再扩 hard silt 样本人工审查
 
-- SG 导数相关输入
-- 对数比值特征
-- 小波能量特征
-- PCA 得分
-- 峰局部对比特征
-- 按测量时长加权
-- 基于人工审查结果的样本级降权
+有帮助，但提升已经很小，不建议继续 `round4 / round5`。
 
-### 6.2 当前维度
+### 6.3 已试过但未击中主瓶颈
+- 第一批 physics-guided features
+- 第一批 robust local peak features
 
-当前总特征维度：
-- 基础工程特征：`77`
-- PCA：`15`
-- 合计：`92`
+结论：
 
-对应关系：
-- `configs/config.json -> model.window_feature_dim = 92`
-
-说明：
-- `src/dataset.py` 里的 `_precompute_statistics()` 会自动校验维度
-- 如果以后再加特征，必须同步更新 `window_feature_dim`
-
-### 6.3 最近新增的一批物理特征
-
-在提交 `352a3d8 feat: add physics-guided silt features` 中，新加了 5 个特征：
-
-- 净峰面积比值 `net_k / net_th`
-- 净峰面积比值 `net_th / net_u`
-- 净峰面积比值 `net_k / net_u`
-- `compton_curvature`
-- `net_peak_fraction`
-
-这一版实验结论：
-- 对整体结构有少量帮助
-- 但没有实质改善粉土主瓶颈
-- 当前最佳结果仍不是这版
+- 不是完全没信息
+- 但没有稳定刷新主线
+- 甚至有过“帮到砂土、但伤到粉土”的情况
 
 
-## 七、OOF 缓存与 Phase2-only 能力
+## 7. flat baseline 与 hierarchical 的当前定位
+### 7.1 flat baseline
+flat baseline 经过重复实验后，已经测出稳定区间：
 
-当前项目已经支持：
+- `Acc ≈ 0.772`
+- `Macro-F1 ≈ 0.742`
+- 粉土 `F1 ≈ 0.596`
+
+它的定位是：
+
+- 作为 `Acc` 导向的稳定对照基线
+- 作为最传统、最好解释的参考主线
+
+历史上的 flat 单次高点：
+
+- [`phase2_phase2_full_proba_uncertainty_20260312_224059`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/phase2_phase2_full_proba_uncertainty_20260312_224059)
+- `Acc = 0.7762`
+- `Macro-F1 = 0.7470`
+
+但这个值目前更像高点，不像稳定均值。
+
+### 7.2 hierarchical（方案 A）
+方案 A 的定义是：
+
+- 不改 Phase 1 基模型训练目标
+- 只改 Phase 2 判别逻辑
+- 第一层：`粉土 vs 非粉土`
+- 第二层：`粘土 vs 砂土`
+
+它的定位是：
+
+- 作为 `粉土 F1 / Macro-F1` 导向的升级线
+- 当前比继续堆特征更值得继续优化
+
+默认阈值 `0.50` 时，完整训练多轮结果说明：
+
+- 相比 flat，`Acc` 没有明显拉开
+- 但粉土 `F1` 与 `Macro-F1` 更好一些
+
+
+## 8. Stage 1 threshold 调优结论
+### 8.1 为什么要调 threshold
+hierarchical 把 hardest problem 拆出来了：
+
+- “这个样本到底是不是粉土”
+
+所以最有价值的旋钮不是再加一批特征，而是：
+
+- Stage 1 直接判粉土的阈值 `silt_threshold`
+
+### 8.2 第一轮粗扫
+粗扫范围：
+
+- `0.45 / 0.50 / 0.55 / 0.60`
+
+结论：
+
+- `0.45` 明显好于 `0.50+`
+- 说明之前默认阈值偏高，压住了粉土
+
+### 8.3 第二轮细扫
+细扫范围：
+
+- `0.41 / 0.42 / 0.43 / 0.44`
+
+`Phase2-only + OOF cache` 结果里，当前最优点是：
+
+- `0.43`
+
+对应最优 `Phase2-only` 结果：
+
+- 目录：[`phase2_phase2_only_proba_uncertainty_20260318_195149`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/phase2_phase2_only_proba_uncertainty_20260318_195149)
+- `Acc = 0.7795`
+- `Macro-F1 = 0.7536`
+- 粉土 `F1 = 0.6247`
+
+为什么选 `0.43`：
+
+- 比 `0.41 / 0.42` 更少把粘土错误吸进粉土
+- 比 `0.44` 又多保住了一些粉土
+- 在混淆矩阵上最像真正的平衡点
+
+### 8.4 重要提醒
+`0.43` 目前是：
+
+- **固定 OOF 下的最优 threshold**
+
+它还不等于：
+
+- **完整训练稳态一定就是 0.7795**
+
+也就是说：
+
+- `Phase2-only` 负责找方向
+- 完整训练负责确认这个方向能不能站住
+
+
+## 9. 当前完整训练结果怎么解读
+### 9.1 hierarchical + 0.42 的完整训练
+目前已经看到的完整训练结果说明：
+
+- `0.42` 对粉土 `F1 / Macro-F1` 是有帮助的
+- 但总 `Acc` 还没有稳定复现 `Phase2-only` 的高点
+
+典型完整训练结果：
+
+- [`phase2_phase2_full_proba_uncertainty_20260318_193134`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/phase2_phase2_full_proba_uncertainty_20260318_193134)
+- `Acc = 0.7728`
+- `Macro-F1 = 0.7456`
+- 粉土 `F1 = 0.6105`
+
+结论：
+
+- hierarchical + tuned threshold 对粉土和 Macro-F1 是正向的
+- 但完整训练存在 Phase 1 波动，不能直接拿 `Phase2-only` 最优数值当完整训练稳态
+
+### 9.2 当前最稳妥的双主线写法
+如果现在要定稿，最稳妥的口径是：
+
+- `flat baseline`
+  - 作为 `Acc` 导向主线 / 对照基线
+
+- `hierarchical + tuned threshold`
+  - 作为 `粉土 F1 / Macro-F1` 导向主线
+
+这样写是因为：
+
+- 当前“总 Acc 最优”和“粉土/Macro-F1 最优”还没有完全统一到同一条线上
+
+
+## 10. 当前代码层面的最近有效改动
+### 10.1 训练/数据传输提速
+提交：
+
+- `71cee74 perf: improve dataloader and device transfer efficiency`
+
+内容：
+
+- DataLoader 统一通过 helper 构建
+- `persistent_workers=True`（仅 `num_workers>0`）
+- `prefetch_factor=2`（仅 `num_workers>0`）
+- `pin_memory` 仅在 CUDA 环境下启用
+- 训练/验证/推理改用 `non_blocking` device transfer
+- `optimizer.zero_grad(set_to_none=True)`
+- 推理路径改为 `torch.inference_mode()`
+
+这些改动不改变实验逻辑，只减少训练和推理公共开销。
+
+### 10.2 训练后字体 warning 修复
+提交：
+
+- `dd2ca40 fix: suppress plot glyph warnings in artifacts`
+
+内容：
+
+- 绘图时自动检查是否有可用中文字体
+- 如果没有，则自动退回英文标签
+- 解决 AutoDL 上反复出现的：
+  - `Glyph missing from font(s) DejaVu Sans`
+
+不影响：
+
+- metrics
+- csv
+- misclassified
+- 训练结果本身
+
+
+## 11. OOF cache / Phase2-only 仍然是关键基础设施
+当前已稳定支持：
 
 - `--oof-path`
 - `--phase2-only`
 - `--save-oof`
 - `--meta-features`
 
-对应文件：
+关键文件：
+
 - [`experiments/artifacts/oof_cache.npz`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/oof_cache.npz)
 
-这套能力已经稳定，作用是：
-- 完整跑一次 Phase 1 后保存 OOF
-- 后续只改 stacking 元特征时，不需要重复跑完整训练
+用途：
 
-当前已做的防护：
-- `allow_pickle=False`
-- `config_hash` 校验
-- metadata 校验
-- OOF finite 检查
+- 完整训练 Phase 1 一次后保存 OOF
+- 后面只改 stacking / hierarchical / threshold 时，直接几秒内重跑 Phase 2
+
+当前阈值 sweep 就是靠这套能力完成的。
 
 
-## 八、训练后产物与“老三样”
+## 12. 当前最推荐的下一步
+如果继续沿方案 A 深挖，推荐顺序是：
 
-每次完整训练结束后，产物目录在：
-- [`experiments/artifacts/`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts)
+1. 先固定 `silt_threshold = 0.43`
+2. 做 1~2 次完整训练验证
+3. 重点看：
+   - `Macro-F1`
+   - 粉土 `F1`
+   - 总 `Acc`
+4. 再决定 hierarchical + 0.43 是否正式收口
 
-典型产物：
-- `stacking_oof_metrics.json`
-- `stacking_oof_report.txt`
-- `stacking_oof_predictions.csv`
-- `stacking_oof_misclassified.csv`
-- `stacking_oof_confusion_counts.png`
-- `stacking_oof_confusion_norm.png`
-- `stacking_oof_per_class_f1.png`
+如果目标优先级是：
 
-当前这条项目线约定的“老三样”是：
-1. `stacking_oof_metrics.json`
-2. `stacking_oof_predictions.csv` 的混淆矩阵
-3. `measure_time` 分组准确率
+- `Acc`：保留 flat baseline 为主线
+- `粉土 F1 / Macro-F1`：优先 hierarchical + tuned threshold
 
+不建议现在优先做：
 
-## 九、人工审查 / 软处理这条线目前做到哪了
+- 新一轮大规模人工审查
+- 再加一批物理特征
+- 直接上方案 B 全链路重构
 
-主文件：
-- [`experiments/artifacts/noisy_silt_candidates.csv`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/noisy_silt_candidates.csv)
+原因：
 
-已做过的轮次：
-- [`experiments/artifacts/noisy_silt_candidates_round2.csv`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/noisy_silt_candidates_round2.csv)
-- [`experiments/artifacts/noisy_silt_candidates_round3.csv`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/noisy_silt_candidates_round3.csv)
-
-当前口径：
-- 这些 `sample_weight` 不是“属于粉土的概率”
-- 而是“这个带着粉土标签的样本，值不值得被当成标准粉土强监督学习”
-
-经验结论：
-- `round2` 带来了主要收益
-- `round3` 仍有一点帮助，但已经明显进入收益递减
-- 大规模继续做 `round4 / round5` 不划算
+- 方案 A 还没有被彻底吃干净
+- 而且它已经是当前最有证据支持的优化方向
 
 
-## 十、当前最佳结果与最近几轮结果
-
-### 10.1 当前强基准
-
-目前最值得当作强基准对比的结果是：
-- 目录：
-  - [`experiments/artifacts/phase2_phase2_full_proba_uncertainty_20260312_224059`](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/experiments/artifacts/phase2_phase2_full_proba_uncertainty_20260312_224059)
-- 指标：
-  - `Accuracy = 0.7762`
-  - `Macro-F1 = 0.7470`
-
-这是当前主要 benchmark。
-
-### 10.2 最近几轮结论
-
-手工审查后 `round3` 方向：
-- 结果大约在 `Acc 0.7723`
-- `Macro-F1 0.7435`
-- 对 persistent hard silt 有一点作用，但没刷新最佳
-
-第一批物理特征：
-- 结果大约在 `Acc 0.7728`
-- `Macro-F1 0.7418`
-- 砂土更强了一点
-- 粉土反而略退
-
-结论：
-- 第一批物理特征不是完全没信息
-- 但没有击中当前主瓶颈
-
-
-## 十一、误分类归因总结
-
-### 11.1 persistent 粉土错分现在是什么样
-
-现在剩下的顽固粉土错分，已经不是大面积散乱错误，而是集中到少数固定模式：
-
-- 大多集中在 `30s / 60s`
-- 高置信错分
-- 低熵
-- 错分方向稳定：
-  - `粉土 -> 粘土`
-  - `粉土 -> 砂土`
-
-这说明：
-- 它们不是随机波动
-- 不是简单训练不够
-- 很多样本本身就是边界样本、混合样本或非典型粉土
-
-### 11.2 人工审查真正解决了什么
-
-人工审查这条线主要解决的是：
-- 中低置信
-- 中等 margin
-- 边界模糊但可修复
-的那部分粉土错分
-
-而对最顽固的那批 high-confidence hard samples，作用有限。
-
-所以现在的瓶颈已经变成：
-
-**不是继续清洗更多样本，而是要让特征表达更能区分“短时长 + 边界型粉土”。**
-
-
-## 十二、接下来最推荐做什么
-
-### 12.1 不建议继续做什么
-
-当前不建议优先做：
-
-- 再来一轮大规模 `round4` 样本人工审查
-- 再堆一批类似的全局窗口比值特征
-- 直接做大规模模型架构重写
-- 在没验证局部特征之前，直接切层级策略
-
-### 12.2 当前推荐方向
-
-当前最合理的下一步是：
-
-从“全局窗口比值”转向更贴近顽固粉土错分的特征：
-
-- 净峰-背景分离
-- 局部峰形
-- 短时长噪声鲁棒
-
-### 12.3 最值得先做的 3 个局部 / 鲁棒特征
-
-后续优先考虑这 3 个：
-
-1. `net_peak_snr`
-- 关键思想：`(峰高 - 背景) / 局部噪声`
-- 目的：判断短时长条件下主峰到底靠不靠谱
-
-2. `net_peak_area_fraction`
-- 关键思想：净峰面积占窗口或全谱的比例
-- 目的：把“真实峰强”和“背景抬高”分开
-
-3. `peak_sharpness`
-- 关键思想：看峰顶局部是尖还是钝
-- 目的：抓住边界样本中“整体相似、局部峰形不同”的区别
-
-
-## 十三、为什么当前要从全局物理比值转向局部/鲁棒特征
-
-原理上讲：
-
-- 全局窗口比值更擅长区分“大类差异”
-- 但当前剩下的错误不是大类没分开，而是边界样本细节没分开
-
-现在这些 persistent 粉土错分的本质更像：
-- 峰和背景混在一起
-- 局部峰形不稳定
-- 短时长噪声把粉土特征淹掉了
-
-所以真正需要回答的问题已经不是：
-- “整体上更像哪类”
-
-而是：
-- “关键峰到底清不清楚”
-- “峰和背景能不能分开”
-- “短时长条件下这个峰是否仍可置信”
-
-
-## 十四、AutoDL 5090 训练操作要点
-
+## 13. 5090 常用操作要点
 项目目录：
+
 - `/root/autodl-tmp/gamma/gamma-spectrum-classification`
 
-典型更新流程：
+更新代码常用命令：
 
 ```bash
 cd /root/autodl-tmp/gamma/gamma-spectrum-classification
@@ -372,15 +378,7 @@ git pull
 git log -1 --oneline
 ```
 
-如果 `git pull` 因网络失败：
-- 直接重试
-
-如果 `git pull` 因本地修改冲突失败：
-- 通常先 `git restore configs/config.json`
-- 需要时再 `git restore src/train_ensemble.py`
-- 然后再 `git pull`
-
-服务器训练前常用配置改写：
+服务器路径改写：
 
 ```bash
 sed -i 's#"train_dir": "E:/data/xunlian"#"train_dir": "/root/autodl-tmp/gamma/gamma_data/xunlian"#' configs/config.json
@@ -395,18 +393,24 @@ sed -E -i 's/"num_workers": *[0-9]+/"num_workers": 16/' configs/config.json
 python -u src/train_ensemble.py
 ```
 
+训练后“老三样”：
 
-## 十五、当前接手时最短摘要
+1. `stacking_oof_metrics.json`
+2. `stacking_oof_predictions.csv` 的混淆矩阵
+3. `measure_time` 分组准确率
 
-如果新的开发者只看一段话，应该看这一段：
 
-- 当前主线已经稳定
-- 当前最佳仍是人工审查增强后的老版本，不是最新那版物理比值特征
-- 大规模继续人工审查已经不划算
-- 第一批新物理特征没有击中粉土主瓶颈
-- 接下来最值得做的是：
-  - 净峰-背景分离
-  - 局部峰形
-  - 短时长噪声鲁棒
+## 14. 接手时最短摘要
+如果新接手的人只看一段，请看这一段：
 
-这就是当前项目的真实状态。
+- 项目当前已经稳定，不缺基础设施
+- flat baseline 的稳态约是 `Acc 0.772 / Macro-F1 0.742 / 粉土F1 0.596`
+- hierarchical 方向是当前最值得继续的升级方向
+- 方案 A 已做完：只改 Phase 2，不改基模型训练
+- 当前最重要的新结论是：
+  - `Stage 1 threshold` 是关键旋钮
+  - `0.43` 是当前 `Phase2-only` 下的最优阈值
+- 当前代码默认已经是：
+  - `hierarchical + threshold + 0.43`
+- 如果追总 `Acc`，flat 仍是最稳对照主线
+- 如果追 `粉土 F1 / Macro-F1`，hierarchical + tuned threshold 是当前最合适的主线
