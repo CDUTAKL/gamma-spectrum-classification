@@ -5,18 +5,45 @@ import numpy as np
 import seaborn as sns
 import torch
 import torch.nn as nn
-from sklearn.metrics import (classification_report, confusion_matrix,
-                             f1_score)
+from sklearn.metrics import confusion_matrix, f1_score
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 DEFAULT_CLASS_NAMES = ["粘土", "砂土", "粉土"]
+PLOT_NAME_FALLBACKS = {
+    "粘土": "Clay",
+    "砂土": "Sand",
+    "粉土": "Silt",
+}
+
+
+def _configure_plot_text(class_names: list):
+    """Pick a usable font and fallback labels for headless servers."""
+    from matplotlib import font_manager
+
+    candidate_fonts = [
+        "Microsoft YaHei",
+        "SimHei",
+        "Noto Sans CJK SC",
+        "Source Han Sans SC",
+        "WenQuanYi Zen Hei",
+        "Arial Unicode MS",
+    ]
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    for font_name in candidate_fonts:
+        if font_name in available:
+            plt.rcParams["font.family"] = [font_name]
+            plt.rcParams["axes.unicode_minus"] = False
+            return list(class_names), "预测标签", "真实标签"
+
+    plt.rcParams["font.family"] = ["DejaVu Sans"]
+    plt.rcParams["axes.unicode_minus"] = False
+    safe_names = [PLOT_NAME_FALLBACKS.get(name, name) for name in class_names]
+    return safe_names, "Predicted", "True"
 
 
 def evaluate_epoch(
-        
     model: nn.Module,
-
     val_loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
@@ -26,7 +53,6 @@ def evaluate_epoch(
     all_preds = []
     all_labels = []
     total_loss = 0.0
-
     non_blocking = device.type == "cuda"
 
     with torch.inference_mode():
@@ -47,12 +73,15 @@ def evaluate_epoch(
     labels_range = list(range(len(class_names)))
 
     accuracy = (all_preds == all_labels).mean()
-    per_class_f1 = f1_score(all_labels, all_preds, average=None,
-                            labels=labels_range, zero_division=0)
-    macro_f1 = f1_score(all_labels, all_preds, average="macro",
-                        labels=labels_range, zero_division=0)
-    weighted_f1 = f1_score(all_labels, all_preds, average="weighted",
-                           labels=labels_range, zero_division=0)
+    per_class_f1 = f1_score(
+        all_labels, all_preds, average=None, labels=labels_range, zero_division=0
+    )
+    macro_f1 = f1_score(
+        all_labels, all_preds, average="macro", labels=labels_range, zero_division=0
+    )
+    weighted_f1 = f1_score(
+        all_labels, all_preds, average="weighted", labels=labels_range, zero_division=0
+    )
     cm = confusion_matrix(all_labels, all_preds, labels=labels_range)
 
     return {
@@ -72,11 +101,19 @@ def plot_confusion_matrix(
     epoch: int,
     save_path: str = None,
 ) -> plt.Figure:
+    display_names, xlabel, ylabel = _configure_plot_text(class_names)
     fig, ax = plt.subplots(figsize=(7, 6))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-                xticklabels=class_names, yticklabels=class_names, ax=ax)
-    ax.set_xlabel("预测标签")
-    ax.set_ylabel("真实标签")
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        xticklabels=display_names,
+        yticklabels=display_names,
+        ax=ax,
+    )
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
     ax.set_title(f"Confusion Matrix - Epoch {epoch}")
     plt.tight_layout()
     if save_path:
@@ -100,8 +137,7 @@ def log_to_tensorboard(
     writer.add_scalar("F1/macro", metrics["macro_f1"], epoch)
     writer.add_scalar("F1/weighted", metrics["weighted_f1"], epoch)
     for i, name in enumerate(class_names):
-        writer.add_scalar(f"F1_per_class/{name}",
-                          float(metrics["per_class_f1"][i]), epoch)
+        writer.add_scalar(f"F1_per_class/{name}", float(metrics["per_class_f1"][i]), epoch)
 
     cm_save_path = os.path.join(log_dir, f"confusion_matrix_epoch{epoch:03d}.png")
     fig = plot_confusion_matrix(

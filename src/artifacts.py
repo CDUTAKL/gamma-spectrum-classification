@@ -8,6 +8,12 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import classification_report, confusion_matrix
 
+PLOT_NAME_FALLBACKS = {
+    "粘土": "Clay",
+    "砂土": "Sand",
+    "粉土": "Silt",
+}
+
 
 def _ensure_dir(path: str) -> str:
     os.makedirs(path, exist_ok=True)
@@ -41,6 +47,31 @@ def _maybe_open(path: str, enabled: bool) -> None:
         return
 
 
+def _configure_plot_text(matplotlib_module, class_names: list[str]) -> tuple[list[str], str, str]:
+    """Return display labels that are safe for the current font environment."""
+    from matplotlib import font_manager
+
+    candidate_fonts = [
+        "Microsoft YaHei",
+        "SimHei",
+        "Noto Sans CJK SC",
+        "Source Han Sans SC",
+        "WenQuanYi Zen Hei",
+        "Arial Unicode MS",
+    ]
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    for font_name in candidate_fonts:
+        if font_name in available:
+            matplotlib_module.rcParams["font.family"] = [font_name]
+            matplotlib_module.rcParams["axes.unicode_minus"] = False
+            return list(class_names), "预测标签", "真实标签"
+
+    matplotlib_module.rcParams["font.family"] = ["DejaVu Sans"]
+    matplotlib_module.rcParams["axes.unicode_minus"] = False
+    safe_names = [PLOT_NAME_FALLBACKS.get(name, name) for name in class_names]
+    return safe_names, "Predicted", "True"
+
+
 def _plot_confusion_matrix(
     cm: np.ndarray,
     class_names: list[str],
@@ -54,6 +85,7 @@ def _plot_confusion_matrix(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import seaborn as sns
+    display_names, xlabel, ylabel = _configure_plot_text(matplotlib, class_names)
 
     if normalize:
         cm_disp = cm.astype(np.float64)
@@ -76,12 +108,12 @@ def _plot_confusion_matrix(
         annot=True,
         fmt=fmt,
         cmap="Blues",
-        xticklabels=class_names,
-        yticklabels=class_names,
+        xticklabels=display_names,
+        yticklabels=display_names,
         ax=ax,
     )
-    ax.set_xlabel("预测标签")
-    ax.set_ylabel("真实标签")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
     ax.set_title(title)
     plt.tight_layout()
 
@@ -102,9 +134,10 @@ def _plot_class_f1(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    display_names, _, _ = _configure_plot_text(matplotlib, class_names)
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.bar(class_names, per_class_f1, color="#4C78A8")
+    ax.bar(display_names, per_class_f1, color="#4C78A8")
     ax.set_ylim(0.0, 1.0)
     ax.set_ylabel("F1")
     ax.set_title(title)
