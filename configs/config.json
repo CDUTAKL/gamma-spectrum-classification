@@ -11,11 +11,24 @@
             "标签四": 0,
             "标签五": 2
         },
-        "class_names": ["粘土", "砂土", "粉土"],
+        "class_names": [
+            "粘土",
+            "砂土",
+            "粉土"
+        ],
         "energy_windows": {
-            "K": [327, 396],
-            "U": [426, 496],
-            "Th": [682, 820]
+            "K": [
+                327,
+                396
+            ],
+            "U": [
+                426,
+                496
+            ],
+            "Th": [
+                682,
+                820
+            ]
         }
     },
     "augmentation": {
@@ -28,12 +41,24 @@
     },
     "model": {
         "in_channels": 3,
-        "multi_scale_channels": [48, 96, 192],
-        "multi_scale_kernels": [5, 15, 31],
+        "multi_scale_channels": [
+            48,
+            96,
+            192
+        ],
+        "multi_scale_kernels": [
+            5,
+            15,
+            31
+        ],
         "pool_size": 4,
         "se_reduction": 4,
-        "fc_dims": [128],
-        "dropouts": [0.3],
+        "fc_dims": [
+            128
+        ],
+        "dropouts": [
+            0.3
+        ],
         "window_feature_dim": 87,
         "window_hidden_dim": 64,
         "use_transformer_branch": false,
@@ -50,11 +75,19 @@
         "batch_size": 32,
         "epochs": 150,
         "learning_rate": 0.0005,
-        "weight_decay": 1e-4,
+        "weight_decay": 0.0001,
         "loss_type": "focal",
         "focal_gamma": 2.0,
-        "focal_alpha": [1.0, 0.5, 2.0],
-        "class_sample_multipliers": [1.0, 1.0, 1.5],
+        "focal_alpha": [
+            1.0,
+            0.5,
+            2.0
+        ],
+        "class_sample_multipliers": [
+            1.0,
+            1.0,
+            1.5
+        ],
         "time_sample_multipliers": {
             "30": 1.2,
             "60": 1.05,
@@ -78,7 +111,7 @@
         "meta_features": "proba+uncertainty",
         "meta_learner": "logreg",
         "stage1_decision": "threshold",
-        "silt_threshold": 0.5
+        "silt_threshold": 0.42
     },
     "cache": {
         "enabled": true,
