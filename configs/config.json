@@ -76,7 +76,9 @@
     "stacking": {
         "strategy": "hierarchical",
         "meta_features": "proba+uncertainty",
-        "meta_learner": "logreg"
+        "meta_learner": "logreg",
+        "stage1_decision": "threshold",
+        "silt_threshold": 0.5
     },
     "cache": {
         "enabled": true,

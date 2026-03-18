@@ -823,7 +823,9 @@ def _predict_hierarchical_meta(
     class_names: list[str],
     meta_learner: str,
     seed: int,
-) -> tuple[np.ndarray, dict]:
+    stage1_decision: str = "threshold",
+    silt_threshold: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray, dict]:
     """Two-stage hierarchical meta classification for 3-class output.
 
     Stage 1:
@@ -834,6 +836,7 @@ def _predict_hierarchical_meta(
 
     Returns:
       - probs: (N, 3) final class probabilities in the original class order
+      - preds: (N,) final predicted labels after applying the Stage 1 decision rule
       - diagnostics: binary-stage validation summaries for logging
     """
     y_train = np.asarray(y_train, dtype=np.int64)
@@ -873,12 +876,30 @@ def _predict_hierarchical_meta(
     probs = np.clip(probs, 1e-12, 1.0)
     probs = probs / probs.sum(axis=1, keepdims=True)
 
+    stage2_preds = np.where(
+        stage2_proba[:, 1] >= 0.5,
+        non_silt_classes[1],
+        non_silt_classes[0],
+    ).astype(np.int64)
+
+    decision_mode = (stage1_decision or "threshold").strip().lower()
+    if decision_mode == "threshold":
+        preds = np.where(p_silt >= float(silt_threshold), silt_idx, stage2_preds)
+    elif decision_mode == "argmax":
+        preds = probs.argmax(axis=1)
+    else:
+        raise ValueError(f"unsupported stage1_decision: {stage1_decision}")
+    preds = preds.astype(np.int64)
+
     diagnostics = {
         "stage1_positive_name": class_names[silt_idx],
         "stage2_negative_name": class_names[non_silt_classes[0]],
         "stage2_positive_name": class_names[non_silt_classes[1]],
+        "stage1_decision": decision_mode,
+        "silt_threshold": float(silt_threshold),
+        "stage1_silt_rate": float((p_silt >= float(silt_threshold)).mean()),
     }
-    return probs, diagnostics
+    return probs, preds, diagnostics
 
 
 def extract_ml_features(file_paths, measure_times,
@@ -954,6 +975,7 @@ def run_phase2_stacking(
     """运行 Phase 2 stacking 评估，并输出 artifacts。"""
     N = len(oof_true)
     C = config["data"]["num_classes"]
+    stacking_cfg = config.get("stacking", {})
 
     logger.info(f"\n{'=' * 60}")
     logger.info("Phase 2: Stacking 元学习器")
@@ -969,6 +991,11 @@ def run_phase2_stacking(
     logger.info(f"  元特征模式: {meta_mode}")
     logger.info(f"  元特征维度: {meta_X.shape}")
 
+    stage1_decision = stacking_cfg.get("stage1_decision", "threshold")
+    silt_threshold = float(stacking_cfg.get("silt_threshold", 0.5))
+    logger.info(f"  Stage1 判决方式: {stage1_decision}")
+    logger.info(f"  粉土阈值: {silt_threshold:.3f}")
+
     meta_skf = StratifiedKFold(
         n_splits=n_splits,
         shuffle=True,
@@ -979,6 +1006,12 @@ def run_phase2_stacking(
     stacking_cfg = config.get("stacking", {})
     stacking_strategy = stacking_cfg.get("strategy", "flat").lower()
     meta_learner = stacking_cfg.get("meta_learner", "xgb").lower()
+    stage1_decision = stacking_cfg.get("stage1_decision", "threshold")
+    silt_threshold = float(stacking_cfg.get("silt_threshold", 0.5))
+    stage1_decision = stacking_cfg.get("stage1_decision", "threshold")
+    silt_threshold = float(stacking_cfg.get("silt_threshold", 0.5))
+    logger.info(f"  Stage1 判决方式: {stage1_decision}")
+    logger.info(f"  粉土阈值: {silt_threshold:.3f}")
     logger.info(f"  元学习策略: {stacking_strategy}")
     logger.info(f"  元学习器类型: {meta_learner}")
 
@@ -1164,20 +1197,25 @@ def run_phase2_stacking_strategy(
     stack_probs = np.zeros((N, C), dtype=np.float64)
     meta_fold_id = np.zeros(N, dtype=np.int64)
     fold_stack_acc = []
+    stage1_decision = stacking_cfg.get("stage1_decision", "threshold")
+    silt_threshold = float(stacking_cfg.get("silt_threshold", 0.5))
+    logger.info(f"  Stage1 判决方式: {stage1_decision}")
+    logger.info(f"  粉土阈值: {silt_threshold:.3f}")
 
     for fold_idx, (train_idx, val_idx) in enumerate(
         meta_skf.split(all_fps, stratify_key)
     ):
         fold = fold_idx + 1
-        fold_proba, diagnostics = _predict_hierarchical_meta(
+        fold_proba, fold_preds, diagnostics = _predict_hierarchical_meta(
             meta_X_train=meta_X[train_idx],
             y_train=oof_true[train_idx],
             meta_X_val=meta_X[val_idx],
             class_names=class_names,
             meta_learner=meta_learner,
             seed=seed + fold,
+            stage1_decision=stage1_decision,
+            silt_threshold=silt_threshold,
         )
-        fold_preds = fold_proba.argmax(axis=1)
 
         stack_preds[val_idx] = fold_preds
         stack_probs[val_idx] = fold_proba
@@ -1197,6 +1235,12 @@ def run_phase2_stacking_strategy(
             diagnostics["stage1_positive_name"],
             diagnostics["stage2_negative_name"],
             diagnostics["stage2_positive_name"],
+        )
+        logger.info(
+            "    Stage1 decision=%s, silt_threshold=%.3f, direct_silt_rate=%.3f",
+            diagnostics["stage1_decision"],
+            diagnostics["silt_threshold"],
+            diagnostics["stage1_silt_rate"],
         )
         logger.info(f"  Fold {fold}: Acc={fold_acc:.4f}  F1={fold_f1:.4f}")
         logger.info(
