@@ -84,18 +84,19 @@ def train_one_epoch(
     correct = 0
     total = 0
     use_amp = scaler is not None
+    non_blocking = device.type == "cuda"
 
     desc = f"Fold {fold} Epoch {epoch} [Train]" if fold > 0 else f"Epoch {epoch} [Train]"
     pbar = tqdm(train_loader, desc=desc, leave=False)
     for batch_idx, (data, window_features, labels) in enumerate(pbar):
-        data = data.to(device)
-        window_features = window_features.to(device)
-        labels = labels.to(device)
+        data = data.to(device, non_blocking=non_blocking)
+        window_features = window_features.to(device, non_blocking=non_blocking)
+        labels = labels.to(device, non_blocking=non_blocking)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         # AMP: autocast 块内的运算自动选择 FP16/FP32
-        with torch.amp.autocast("cuda", enabled=use_amp):
+        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
             # Mixup 数据增强
             if mixup_alpha > 0 and model.training:
                 lam = np.random.beta(mixup_alpha, mixup_alpha)

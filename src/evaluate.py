@@ -27,11 +27,13 @@ def evaluate_epoch(
     all_labels = []
     total_loss = 0.0
 
-    with torch.no_grad():
+    non_blocking = device.type == "cuda"
+
+    with torch.inference_mode():
         for data, window_features, labels in val_loader:
-            data = data.to(device)
-            window_features = window_features.to(device)
-            labels = labels.to(device)
+            data = data.to(device, non_blocking=non_blocking)
+            window_features = window_features.to(device, non_blocking=non_blocking)
+            labels = labels.to(device, non_blocking=non_blocking)
             logits = model(data, window_features)
             loss = criterion(logits, labels)
             total_loss += loss.item()

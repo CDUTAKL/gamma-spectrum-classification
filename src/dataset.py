@@ -20,6 +20,27 @@ WAVELET_LEVEL = 5
 PCA_COMPONENTS = 15
 
 
+def build_loader_kwargs(num_workers: int, max_workers: int = None) -> dict:
+    """Build DataLoader kwargs with low-risk throughput optimizations.
+
+    - `persistent_workers` avoids worker restart overhead between epochs.
+    - `prefetch_factor` keeps a small queue ready when multiprocessing is enabled.
+    - `pin_memory` is only useful when CUDA is available.
+    """
+    worker_count = max(int(num_workers), 0)
+    if max_workers is not None:
+        worker_count = min(worker_count, int(max_workers))
+
+    kwargs = {
+        "num_workers": worker_count,
+        "pin_memory": torch.cuda.is_available(),
+    }
+    if worker_count > 0:
+        kwargs["persistent_workers"] = True
+        kwargs["prefetch_factor"] = 2
+    return kwargs
+
+
 def parse_filename(filename: str):
     """从文件名解析采集时长（秒）和类别标签，失败返回 None。"""
     if not filename.endswith(".txt"):
@@ -909,13 +930,15 @@ def build_dataloaders(config: dict):
         weights=sample_weights, num_samples=len(sample_weights), replacement=True,
     )
     num_workers = config["training"].get("num_workers", 0)
+    train_loader_kwargs = build_loader_kwargs(num_workers=num_workers)
+    val_loader_kwargs = build_loader_kwargs(num_workers=num_workers, max_workers=2)
     train_loader = DataLoader(
         train_dataset, batch_size=config["training"]["batch_size"],
-        sampler=sampler, num_workers=num_workers, pin_memory=True, drop_last=True,
+        sampler=sampler, drop_last=True, **train_loader_kwargs,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=config["training"]["batch_size"],
-        shuffle=False, num_workers=min(num_workers, 2), pin_memory=True, drop_last=False,
+        shuffle=False, drop_last=False, **val_loader_kwargs,
     )
     return train_loader, val_loader
 
@@ -967,13 +990,15 @@ def build_kfold_dataloaders(config: dict, n_splits: int = 5):
         sampler = WeightedRandomSampler(
             weights=sample_weights, num_samples=len(sample_weights), replacement=True,
         )
+        train_loader_kwargs = build_loader_kwargs(num_workers=num_workers)
+        val_loader_kwargs = build_loader_kwargs(num_workers=num_workers, max_workers=2)
         train_loader = DataLoader(
             train_dataset, batch_size=config["training"]["batch_size"],
-            sampler=sampler, num_workers=num_workers, pin_memory=True, drop_last=True,
+            sampler=sampler, drop_last=True, **train_loader_kwargs,
         )
         val_loader = DataLoader(
             val_dataset, batch_size=config["training"]["batch_size"],
-            shuffle=False, num_workers=min(num_workers, 2), pin_memory=True, drop_last=False,
+            shuffle=False, drop_last=False, **val_loader_kwargs,
         )
         print(f"  Fold {fold_idx + 1}: 训练 {len(train_dataset)} / 验证 {len(val_dataset)}")
         folds.append((train_loader, val_loader))

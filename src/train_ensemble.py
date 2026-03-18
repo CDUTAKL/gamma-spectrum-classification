@@ -75,6 +75,7 @@ sys.path.insert(
 
 from src.dataset import (
     GammaSpectrumDataset,
+    build_loader_kwargs,
     extract_engineered_features,
     load_spectrum,
     scan_directory,
@@ -505,13 +506,15 @@ def train_cnn_model(config, train_ds, val_ds, device, logger, tag, seed):
     sampler = WeightedRandomSampler(
         weights, len(weights), replacement=True
     )
+    train_loader_kwargs = build_loader_kwargs(num_workers=nw)
+    val_loader_kwargs = build_loader_kwargs(num_workers=nw, max_workers=2)
     train_loader = DataLoader(
         train_ds, batch_size=bs, sampler=sampler,
-        num_workers=nw, pin_memory=True, drop_last=True,
+        drop_last=True, **train_loader_kwargs,
     )
     val_loader = DataLoader(
         val_ds, batch_size=bs, shuffle=False,
-        num_workers=nw, pin_memory=True,
+        **val_loader_kwargs,
     )
 
     # 模型初始化 + Gradient Centralization
@@ -663,19 +666,23 @@ def predict_cnn_tta(models, dataset, device,
     """
     loader = DataLoader(
         dataset, batch_size=batch_size, shuffle=False,
-        num_workers=0, pin_memory=True,
+        **build_loader_kwargs(num_workers=0),
     )
+
+    for m in models:
+        m.eval()
 
     def _collect_logits():
         """一次前向传播, 返回所有样本的集成平均 logits。"""
         all_logits = []
         all_labels = []
+        non_blocking = device.type == "cuda"
         for data, wf, labels in loader:
-            data, wf = data.to(device), wf.to(device)
+            data = data.to(device, non_blocking=non_blocking)
+            wf = wf.to(device, non_blocking=non_blocking)
             batch_logits = None
             for m in models:
-                m.eval()
-                with torch.no_grad():
+                with torch.inference_mode():
                     out = m(data, wf).cpu()
                 if batch_logits is None:
                     batch_logits = out
