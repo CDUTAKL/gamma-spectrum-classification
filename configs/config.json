@@ -104,7 +104,8 @@
         "seed": 42,
         "swa_start_epoch": 0.75,
         "use_compile": true,
-        "use_amp": false
+        "use_amp": false,
+        "ml_hierarchical_training": false
     },
     "stacking": {
         "strategy": "hierarchical",

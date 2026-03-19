@@ -405,6 +405,143 @@ def smote_oversample(X: np.ndarray, y: np.ndarray,
     return np.vstack(X_parts), np.concatenate(y_parts)
 
 
+def _build_ml_classifier(model_kind: str, seed: int, n_classes: int = 3):
+    """Create a Phase 1 ML base classifier with the current project defaults."""
+    kind = (model_kind or "").strip().lower()
+    if kind == "gb":
+        return GradientBoostingClassifier(
+            n_estimators=300,
+            learning_rate=0.05,
+            max_depth=4,
+            min_samples_leaf=5,
+            subsample=0.8,
+            random_state=seed,
+        )
+    if kind == "xgb":
+        return XGBClassifier(
+            n_estimators=300,
+            learning_rate=0.05,
+            max_depth=4,
+            min_child_weight=3,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            eval_metric="logloss" if int(n_classes) == 2 else "mlogloss",
+            random_state=seed,
+        )
+    raise ValueError(f"unsupported model_kind: {model_kind}")
+
+
+def _stage1_labels(y: np.ndarray, silt_idx: int = 2) -> np.ndarray:
+    """Map the 3-class target into Stage 1: silt vs non-silt."""
+    y = np.asarray(y, dtype=np.int64)
+    return (y == int(silt_idx)).astype(np.int64)
+
+
+def _stage2_subset(X: np.ndarray, y: np.ndarray, silt_idx: int = 2):
+    """Select non-silt samples and map them into clay/sand binary labels."""
+    y = np.asarray(y, dtype=np.int64)
+    mask = y != int(silt_idx)
+    non_silt_classes = sorted(int(cls) for cls in np.unique(y[mask]))
+    if len(non_silt_classes) != 2:
+        raise ValueError(
+            f"stage2 expects exactly two non-silt classes, got {non_silt_classes}"
+        )
+    stage2_X = X[mask]
+    stage2_y = (y[mask] == non_silt_classes[1]).astype(np.int64)
+    return stage2_X, stage2_y, non_silt_classes
+
+
+def _compose_hierarchical_ml_proba(
+    stage1_proba: np.ndarray,
+    stage2_proba: np.ndarray,
+    non_silt_classes: list[int],
+    n_classes: int = 3,
+    silt_idx: int = 2,
+) -> np.ndarray:
+    """Compose two binary-stage outputs into the original 3-class probability."""
+    probs = np.zeros((stage1_proba.shape[0], int(n_classes)), dtype=np.float64)
+    p_non_silt = stage1_proba[:, 0]
+    p_silt = stage1_proba[:, 1]
+    probs[:, int(silt_idx)] = p_silt
+    probs[:, int(non_silt_classes[0])] = p_non_silt * stage2_proba[:, 0]
+    probs[:, int(non_silt_classes[1])] = p_non_silt * stage2_proba[:, 1]
+    probs = np.clip(probs, 1e-12, 1.0)
+    probs = probs / probs.sum(axis=1, keepdims=True)
+    return probs
+
+
+def _train_flat_ml_branch(
+    model_kind: str,
+    X_train_s: np.ndarray,
+    y_train: np.ndarray,
+    X_val_s: np.ndarray,
+    y_val: np.ndarray,
+    seed: int,
+) -> tuple[np.ndarray, float, dict]:
+    """Train the existing flat 3-class ML branch and return validation probs."""
+    X_train_sm, y_train_sm = smote_oversample(X_train_s, y_train, k=5)
+    clf = _build_ml_classifier(
+        model_kind, seed, n_classes=int(np.unique(y_train).size)
+    )
+    clf.fit(X_train_sm, y_train_sm)
+    probs = clf.predict_proba(X_val_s).astype(np.float64)
+    acc = accuracy_score(y_val, probs.argmax(axis=1))
+    diagnostics = {
+        "mode": "flat",
+        "smote_before": int(len(y_train)),
+        "smote_after": int(len(y_train_sm)),
+    }
+    return probs, float(acc), diagnostics
+
+
+def _train_hierarchical_ml_branch(
+    model_kind: str,
+    X_train_s: np.ndarray,
+    y_train: np.ndarray,
+    X_val_s: np.ndarray,
+    y_val: np.ndarray,
+    seed: int,
+    n_classes: int = 3,
+    silt_idx: int = 2,
+) -> tuple[np.ndarray, float, dict]:
+    """Train a two-stage hierarchical ML branch but keep a 3-class output API."""
+    stage1_y = _stage1_labels(y_train, silt_idx=silt_idx)
+    X_stage1_sm, y_stage1_sm = smote_oversample(X_train_s, stage1_y, k=5)
+    stage1_clf = _build_ml_classifier(model_kind, seed, n_classes=2)
+    stage1_clf.fit(X_stage1_sm, y_stage1_sm)
+    stage1_proba = stage1_clf.predict_proba(X_val_s).astype(np.float64)
+
+    X_stage2, y_stage2, non_silt_classes = _stage2_subset(
+        X_train_s, y_train, silt_idx=silt_idx
+    )
+    if np.unique(y_stage2).size < 2:
+        raise ValueError("stage2 training labels must contain both non-silt classes")
+    X_stage2_sm, y_stage2_sm = smote_oversample(X_stage2, y_stage2, k=5)
+    stage2_clf = _build_ml_classifier(model_kind, seed + 17, n_classes=2)
+    stage2_clf.fit(X_stage2_sm, y_stage2_sm)
+    stage2_proba = stage2_clf.predict_proba(X_val_s).astype(np.float64)
+
+    probs = _compose_hierarchical_ml_proba(
+        stage1_proba=stage1_proba,
+        stage2_proba=stage2_proba,
+        non_silt_classes=non_silt_classes,
+        n_classes=n_classes,
+        silt_idx=silt_idx,
+    )
+    acc = accuracy_score(y_val, probs.argmax(axis=1))
+    diagnostics = {
+        "mode": "hierarchical",
+        "stage1_smote_before": int(len(stage1_y)),
+        "stage1_smote_after": int(len(y_stage1_sm)),
+        "stage2_smote_before": int(len(y_stage2)),
+        "stage2_smote_after": int(len(y_stage2_sm)),
+        "stage1_silt_rate": float((stage1_proba[:, 1] >= 0.5).mean()),
+        "stage2_negative_class": int(non_silt_classes[0]),
+        "stage2_positive_class": int(non_silt_classes[1]),
+    }
+    return probs, float(acc), diagnostics
+
+
 # =====================================================================
 #  GPU 能力检测与 AMP 配置
 # =====================================================================
@@ -922,7 +1059,7 @@ def extract_ml_features(file_paths, measure_times,
         feature_stats:   训练集统计量；若包含 PCA 参数则追加 PCA 得分
 
     Returns:
-        (N, D) 特征矩阵，当前 D=86
+        (N, D) 特征矩阵；当前主线配置下 D=87（72 工程特征 + 15 PCA）
     """
     X = []
     stats = feature_stats if feature_stats is not None else {}
@@ -1359,6 +1496,9 @@ def main():
     n_splits = config["training"].get("n_splits", 5)
     ensemble_seeds = [42, 43, 44]
     n_tta = 3
+    ml_hierarchical_training = bool(
+        config.get("training", {}).get("ml_hierarchical_training", False)
+    )
     energy_windows = config["data"]["energy_windows"]
     spectrum_length = config["data"]["spectrum_length"]
 
@@ -1373,6 +1513,10 @@ def main():
         n_splits=n_splits,
         shuffle=True,
         random_state=config["training"]["seed"],
+    )
+
+    logger.info(
+        f"ML 层级训练: {'启用(B1)' if ml_hierarchical_training else '关闭(沿用方案A)'}"
     )
 
     meta_mode = config.get("stacking", {}).get("meta_features", "proba_only")
@@ -1496,7 +1640,8 @@ def main():
             logger.info(f"  CNN 集成+TTA: Acc = {cnn_acc:.4f}")
             fold_cnn_acc.append(cnn_acc)
 
-            logger.info("--- GradientBoosting + SMOTE ---")
+            ml_mode_name = "Hierarchical B1" if ml_hierarchical_training else "Flat"
+            logger.info(f"--- GradientBoosting + SMOTE ({ml_mode_name}) ---")
             X_train = extract_ml_features(
                 tr_fps, tr_mts, energy_windows, spectrum_length, stats
             )
@@ -1508,37 +1653,76 @@ def main():
             scaler = StandardScaler()
             X_train_s = scaler.fit_transform(X_train)
             X_val_s = scaler.transform(X_val)
-            X_train_sm, y_train_sm = smote_oversample(X_train_s, y_train, k=5)
-            logger.info(f"  SMOTE: {len(y_train)} -> {len(y_train_sm)} 样本")
-
-            gb = GradientBoostingClassifier(
-                n_estimators=300,
-                learning_rate=0.05,
-                max_depth=4,
-                min_samples_leaf=5,
-                subsample=0.8,
-                random_state=config["training"]["seed"],
-            )
-            gb.fit(X_train_sm, y_train_sm)
-            gb_probs = gb.predict_proba(X_val_s)
-            gb_acc = accuracy_score(y_val, gb_probs.argmax(axis=1))
+            if ml_hierarchical_training:
+                gb_probs, gb_acc, gb_diag = _train_hierarchical_ml_branch(
+                    model_kind="gb",
+                    X_train_s=X_train_s,
+                    y_train=y_train,
+                    X_val_s=X_val_s,
+                    y_val=y_val,
+                    seed=config["training"]["seed"],
+                    n_classes=C,
+                )
+                logger.info(
+                    "  Stage1 SMOTE: %d -> %d, Stage2 SMOTE: %d -> %d",
+                    gb_diag["stage1_smote_before"],
+                    gb_diag["stage1_smote_after"],
+                    gb_diag["stage2_smote_before"],
+                    gb_diag["stage2_smote_after"],
+                )
+                logger.info(
+                    "  GB hierarchical: stage1_silt_rate = %.4f",
+                    gb_diag["stage1_silt_rate"],
+                )
+            else:
+                gb_probs, gb_acc, gb_diag = _train_flat_ml_branch(
+                    model_kind="gb",
+                    X_train_s=X_train_s,
+                    y_train=y_train,
+                    X_val_s=X_val_s,
+                    y_val=y_val,
+                    seed=config["training"]["seed"],
+                )
+                logger.info(
+                    f"  SMOTE: {gb_diag['smote_before']} -> {gb_diag['smote_after']} 样本"
+                )
             logger.info(f"  GradientBoosting: Acc = {gb_acc:.4f}")
             fold_gb_acc.append(gb_acc)
 
-            logger.info("--- XGBoost + SMOTE ---")
-            xgb_model = XGBClassifier(
-                n_estimators=300,
-                learning_rate=0.05,
-                max_depth=4,
-                min_child_weight=3,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                eval_metric='mlogloss',
-                random_state=config["training"]["seed"],
-            )
-            xgb_model.fit(X_train_sm, y_train_sm)
-            xgb_probs = xgb_model.predict_proba(X_val_s)
-            xgb_acc = accuracy_score(y_val, xgb_probs.argmax(axis=1))
+            logger.info(f"--- XGBoost + SMOTE ({ml_mode_name}) ---")
+            if ml_hierarchical_training:
+                xgb_probs, xgb_acc, xgb_diag = _train_hierarchical_ml_branch(
+                    model_kind="xgb",
+                    X_train_s=X_train_s,
+                    y_train=y_train,
+                    X_val_s=X_val_s,
+                    y_val=y_val,
+                    seed=config["training"]["seed"],
+                    n_classes=C,
+                )
+                logger.info(
+                    "  Stage1 SMOTE: %d -> %d, Stage2 SMOTE: %d -> %d",
+                    xgb_diag["stage1_smote_before"],
+                    xgb_diag["stage1_smote_after"],
+                    xgb_diag["stage2_smote_before"],
+                    xgb_diag["stage2_smote_after"],
+                )
+                logger.info(
+                    "  XGB hierarchical: stage1_silt_rate = %.4f",
+                    xgb_diag["stage1_silt_rate"],
+                )
+            else:
+                xgb_probs, xgb_acc, xgb_diag = _train_flat_ml_branch(
+                    model_kind="xgb",
+                    X_train_s=X_train_s,
+                    y_train=y_train,
+                    X_val_s=X_val_s,
+                    y_val=y_val,
+                    seed=config["training"]["seed"],
+                )
+                logger.info(
+                    f"  SMOTE: {xgb_diag['smote_before']} -> {xgb_diag['smote_after']} 样本"
+                )
             logger.info(f"  XGBoost: Acc = {xgb_acc:.4f}")
             fold_xgb_acc.append(xgb_acc)
 
