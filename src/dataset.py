@@ -801,9 +801,9 @@ class GammaSpectrumDataset(Dataset):
             proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
             artifact_dir = os.path.join(proj_root, "experiments", "artifacts")
             candidate_csvs = [
-                os.path.join(artifact_dir, "noisy_silt_candidates_round3.csv"),
-                os.path.join(artifact_dir, "noisy_silt_candidates.csv"),
                 os.path.join(artifact_dir, "noisy_silt_candidates_round2.csv"),
+                os.path.join(artifact_dir, "noisy_silt_candidates.csv"),
+                os.path.join(artifact_dir, "noisy_silt_candidates_round3.csv"),
             ]
 
             # 兼容 UTF-8 / GBK 两种编码（Excel 在 Windows 下一般存为 GBK）
