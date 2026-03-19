@@ -88,6 +88,15 @@ def _format_float(value: object) -> str:
         return str(value)
 
 
+def _format_pct(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def summarize_artifact(artifact_dir: Path) -> dict:
     report = _load_metrics(artifact_dir)
     silt_key = _find_silt_key(report)
@@ -116,15 +125,49 @@ def print_summary_table(rows: list[dict]) -> None:
     print(df.to_string(index=False))
 
 
+def summarize_confusion_matrix(predictions: pd.DataFrame) -> pd.DataFrame:
+    matrix = pd.crosstab(predictions["true_name"], predictions["pred_name"])
+    row_total = matrix.sum(axis=1)
+    row_acc = []
+    for idx in matrix.index:
+        total = float(row_total.loc[idx])
+        correct = float(matrix.loc[idx, idx]) if idx in matrix.columns else 0.0
+        row_acc.append(correct / total if total > 0 else 0.0)
+
+    summary = matrix.copy()
+    summary["row_total"] = row_total
+    summary["row_acc"] = row_acc
+    return summary.reset_index(names="true_name")
+
+
+def summarize_time_accuracy_wide(time_accuracy: pd.DataFrame) -> pd.DataFrame:
+    row: dict[str, object] = {}
+    for _, item in time_accuracy.sort_values("measure_time").iterrows():
+        mt = item["measure_time"]
+        row[f"mt_{int(mt)}"] = item["accuracy"]
+    return pd.DataFrame([row])
+
+
 def print_confusion_matrix(artifact_dir: Path, predictions: pd.DataFrame) -> None:
     print(f"\n[{artifact_dir.name}] confusion matrix")
-    matrix = pd.crosstab(predictions["true_name"], predictions["pred_name"])
-    print(matrix.to_string())
+    matrix = summarize_confusion_matrix(predictions)
+    display = matrix.copy()
+    for col in display.columns:
+        if col == "true_name":
+            continue
+        if col == "row_acc":
+            display[col] = display[col].map(_format_pct)
+        else:
+            display[col] = display[col].map(_format_float)
+    print(display.to_string(index=False))
 
 
 def print_time_accuracy(artifact_dir: Path, time_accuracy: pd.DataFrame) -> None:
     print(f"\n[{artifact_dir.name}] measure_time accuracy")
-    print(time_accuracy.to_string(index=False))
+    wide = summarize_time_accuracy_wide(time_accuracy)
+    for col in wide.columns:
+        wide[col] = wide[col].map(_format_pct)
+    print(wide.to_string(index=False))
 
 
 def main() -> None:
@@ -199,4 +242,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
