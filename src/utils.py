@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import os
@@ -6,9 +7,53 @@ import numpy as np
 import torch
 
 
+def _deep_merge_dict(base: dict, override: dict) -> dict:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if (
+            key in merged
+            and isinstance(merged[key], dict)
+            and isinstance(value, dict)
+        ):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
 def load_config(config_path: str) -> dict:
-    with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """Load a JSON config with optional relative `extends` support.
+
+    Example:
+      {
+        "extends": "config.local.json"
+      }
+
+    Child values override parent values recursively.
+    """
+    abs_path = os.path.abspath(config_path)
+    with open(abs_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    extends = config.pop("extends", None)
+    if not extends:
+        return config
+
+    if isinstance(extends, str):
+        extends = [extends]
+    if not isinstance(extends, list):
+        raise ValueError("config 'extends' must be a string or a list of strings")
+
+    merged = {}
+    base_dir = os.path.dirname(abs_path)
+    for parent in extends:
+        parent_path = parent
+        if not os.path.isabs(parent_path):
+            parent_path = os.path.join(base_dir, parent_path)
+        parent_cfg = load_config(parent_path)
+        merged = _deep_merge_dict(merged, parent_cfg)
+
+    return _deep_merge_dict(merged, config)
 
 
 def set_seed(seed: int) -> None:

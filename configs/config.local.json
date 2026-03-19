@@ -1,0 +1,11 @@
+{
+    "extends": "config.experiment_b1.json",
+    "data": {
+        "train_dir": "E:/data/xunlian",
+        "val_dir": "E:/data/yanzheng"
+    },
+    "training": {
+        "batch_size": 32,
+        "num_workers": 0
+    }
+}

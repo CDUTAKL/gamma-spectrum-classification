@@ -20,6 +20,22 @@ WAVELET_LEVEL = 5
 PCA_COMPONENTS = 15
 
 
+def _canonical_sample_key(path_str: str) -> str:
+    """Build an OS-agnostic sample key for cross-machine CSV matching.
+
+    We intentionally match on the last two path segments:
+      <split>/<filename>
+
+    This keeps `xunlian/...txt` and `yanzheng/...txt` distinct while ignoring
+    the machine-specific absolute prefix (`E:/data/...` vs `/root/...`).
+    """
+    norm = str(path_str).replace("\\", "/").strip().lower()
+    parts = [part for part in norm.split("/") if part]
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])
+    return norm
+
+
 def build_loader_kwargs(num_workers: int, max_workers: int = None) -> dict:
     """Build DataLoader kwargs with low-risk throughput optimizations.
 
@@ -783,39 +799,46 @@ class GammaSpectrumDataset(Dataset):
         """
         try:
             proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-            csv_path = os.path.join(
-                proj_root, "experiments", "artifacts", "noisy_silt_candidates.csv"
-            )
-            if not os.path.exists(csv_path):
-                return
+            artifact_dir = os.path.join(proj_root, "experiments", "artifacts")
+            candidate_csvs = [
+                os.path.join(artifact_dir, "noisy_silt_candidates_round3.csv"),
+                os.path.join(artifact_dir, "noisy_silt_candidates.csv"),
+                os.path.join(artifact_dir, "noisy_silt_candidates_round2.csv"),
+            ]
 
             # 兼容 UTF-8 / GBK 两种编码（Excel 在 Windows 下一般存为 GBK）
             path_to_weight = {}
-            for enc in ("utf-8", "gbk"):
-                try:
-                    with open(csv_path, "r", encoding=enc, newline="") as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            fp = row.get("file_path")
-                            w = row.get("sample_weight", "").strip()
-                            if not fp or not w:
-                                continue
-                            try:
-                                weight = float(w)
-                            except ValueError:
-                                continue
-                            path_to_weight[fp] = weight
-                    break
-                except UnicodeDecodeError:
-                    path_to_weight = {}
+            for csv_path in candidate_csvs:
+                if not os.path.exists(csv_path):
                     continue
+                for enc in ("utf-8", "gbk"):
+                    try:
+                        with open(csv_path, "r", encoding=enc, newline="") as f:
+                            reader = csv.DictReader(f)
+                            for row in reader:
+                                fp = row.get("file_path")
+                                w = row.get("sample_weight", "").strip()
+                                if not fp or not w:
+                                    continue
+                                try:
+                                    weight = float(w)
+                                except ValueError:
+                                    continue
+                                path_to_weight[_canonical_sample_key(fp)] = weight
+                        break
+                    except UnicodeDecodeError:
+                        path_to_weight = {}
+                        continue
+
+                if path_to_weight:
+                    break
 
             if not path_to_weight:
                 return
 
             # 按当前数据集的 file_paths 生成样本级乘子
             for i, fp in enumerate(self.file_paths):
-                w = path_to_weight.get(fp)
+                w = path_to_weight.get(_canonical_sample_key(fp))
                 if w is not None:
                     self._per_sample_multipliers[i] = float(w)
         except Exception as e:

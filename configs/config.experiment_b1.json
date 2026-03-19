@@ -1,0 +1,11 @@
+{
+    "extends": "config.base.json",
+    "training": {
+        "ml_hierarchical_training": true
+    },
+    "stacking": {
+        "strategy": "hierarchical",
+        "stage1_decision": "threshold",
+        "silt_threshold": 0.43
+    }
+}

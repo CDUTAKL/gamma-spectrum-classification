@@ -1,0 +1,11 @@
+{
+    "extends": "config.experiment_b1.json",
+    "data": {
+        "train_dir": "/root/autodl-tmp/gamma/gamma_data/xunlian",
+        "val_dir": "/root/autodl-tmp/gamma/gamma_data/yanzheng"
+    },
+    "training": {
+        "batch_size": 512,
+        "num_workers": 16
+    }
+}

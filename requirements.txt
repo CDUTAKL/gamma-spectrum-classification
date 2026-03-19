@@ -9,3 +9,4 @@ scikit-learn
 PyWavelets
 tqdm
 tensorboard
+xgboost>=2.0.0
