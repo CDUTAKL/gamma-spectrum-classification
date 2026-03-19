@@ -8,6 +8,15 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import classification_report, confusion_matrix
 
+ASCII_CLASS_NAME_MAP = {
+    "\u7c98\u571f": "Clay",
+    "\u7802\u571f": "Sand",
+    "\u7c89\u571f": "Silt",
+    "绮樺湡": "Clay",
+    "鐮傚湡": "Sand",
+    "绮夊湡": "Silt",
+}
+
 PLOT_NAME_FALLBACKS = {
     "粘土": "Clay",
     "砂土": "Sand",
@@ -23,6 +32,21 @@ def _ensure_dir(path: str) -> str:
 def _safe_prob_columns(n_classes: int) -> list[str]:
     # Keep columns ASCII-only for easier downstream scripting.
     return [f"prob_{i}" for i in range(int(n_classes))]
+
+
+def _ascii_class_name(name: str) -> str:
+    return ASCII_CLASS_NAME_MAP.get(str(name), str(name))
+
+
+def _ascii_metrics_dict(report_dict: dict) -> dict:
+    """Build an ASCII-only companion report for console-friendly viewing."""
+    ascii_report = {}
+    for key, value in report_dict.items():
+        if key in {"accuracy", "macro avg", "weighted avg"}:
+            ascii_report[key] = value
+        else:
+            ascii_report[_ascii_class_name(key)] = value
+    return ascii_report
 
 
 def _maybe_open(path: str, enabled: bool) -> None:
@@ -197,14 +221,17 @@ def save_stacking_oof_artifacts(
         zero_division=0,
     )
     metrics_json = os.path.join(artifact_dir, "stacking_oof_metrics.json")
-    with open(metrics_json, "w", encoding="utf-8") as f:
+    with open(metrics_json, "w", encoding="utf-8-sig") as f:
         json.dump(report_dict, f, ensure_ascii=False, indent=2)
+    metrics_ascii_json = os.path.join(artifact_dir, "stacking_oof_metrics_ascii.json")
+    with open(metrics_ascii_json, "w", encoding="utf-8-sig") as f:
+        json.dump(_ascii_metrics_dict(report_dict), f, ensure_ascii=True, indent=2)
 
     report_txt = os.path.join(artifact_dir, "stacking_oof_report.txt")
     report_str = classification_report(
         y_true, y_pred, target_names=class_names, zero_division=0
     )
-    with open(report_txt, "w", encoding="utf-8") as f:
+    with open(report_txt, "w", encoding="utf-8-sig") as f:
         f.write(report_str + "\n")
 
     # 逐样本明细
@@ -257,6 +284,35 @@ def save_stacking_oof_artifacts(
         mis_df = mis_df.sort_values("margin_top1_top2", ascending=True)
     mis_csv = os.path.join(artifact_dir, "stacking_oof_misclassified.csv")
     mis_df.to_csv(mis_csv, index=False, encoding="utf-8-sig")
+
+    # Persist a warning-free by-time summary so downstream checks do not need
+    # DataFrameGroupBy.apply(...) on grouping columns.
+    by_time_df = (
+        df.groupby("measure_time", sort=True)["correct"]
+        .mean()
+        .rename("accuracy")
+        .reset_index()
+    )
+    by_time_json = os.path.join(
+        artifact_dir, "stacking_oof_accuracy_by_measure_time.json"
+    )
+    with open(by_time_json, "w", encoding="utf-8-sig") as f:
+        json.dump(
+            [
+                {
+                    "measure_time": float(row.measure_time),
+                    "accuracy": float(row.accuracy),
+                }
+                for row in by_time_df.itertuples(index=False)
+            ],
+            f,
+            ensure_ascii=True,
+            indent=2,
+        )
+    by_time_csv = os.path.join(
+        artifact_dir, "stacking_oof_accuracy_by_measure_time.csv"
+    )
+    by_time_df.to_csv(by_time_csv, index=False, encoding="utf-8-sig")
 
     # 混淆矩阵与 F1 图：尽量保存，但绘图失败不应影响 CSV/metrics 产出。
     cm = confusion_matrix(y_true, y_pred, labels=labels_range)
@@ -311,9 +367,12 @@ def save_stacking_oof_artifacts(
         "confusion_counts_png": counts_png,
         "confusion_norm_png": norm_png,
         "metrics_json": metrics_json,
+        "metrics_ascii_json": metrics_ascii_json,
         "report_txt": report_txt,
         "predictions_csv": all_csv,
         "misclassified_csv": mis_csv,
+        "accuracy_by_measure_time_json": by_time_json,
+        "accuracy_by_measure_time_csv": by_time_csv,
         "per_class_f1_png": f1_png,
         "n_samples": n,
         "n_misclassified": int((y_true != y_pred).sum()),
