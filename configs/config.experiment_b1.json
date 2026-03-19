@@ -1,9 +1,38 @@
 {
     "extends": "config.base.json",
     "training": {
-        "ml_hierarchical_training": true
+        "ml_hierarchical_training": true,
+        "ml_hierarchical": {
+            "stage1": {
+                "resampling": {
+                    "strategy": "smote",
+                    "target_ratio": 0.9,
+                    "k_neighbors": 5
+                },
+                "weighting": {
+                    "mode": "effective_number",
+                    "beta": 0.999
+                }
+            },
+            "stage2": {
+                "resampling": {
+                    "strategy": "none",
+                    "target_ratio": 1.0,
+                    "k_neighbors": 5
+                },
+                "weighting": {
+                    "mode": "none",
+                    "beta": 0.999
+                }
+            },
+            "stage_features": {
+                "enabled": true,
+                "include_positive_prob": true
+            }
+        }
     },
     "stacking": {
+        "meta_features": "proba+uncertainty+stage",
         "strategy": "hierarchical",
         "stage1_decision": "threshold",
         "silt_threshold": 0.43

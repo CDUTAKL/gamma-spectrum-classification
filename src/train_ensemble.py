@@ -51,6 +51,7 @@ import os
 import sys
 import warnings
 from datetime import datetime
+from typing import Optional
 
 import numpy as np
 import torch
@@ -122,10 +123,19 @@ def parse_args():
     parser.add_argument(
         "--meta-features",
         type=str,
-        choices=["proba_only", "proba+uncertainty", "proba+uncertainty+time", "uncertainty_only"],
+        choices=[
+            "proba_only",
+            "proba+uncertainty",
+            "proba+uncertainty+time",
+            "uncertainty_only",
+            "proba+uncertainty+stage",
+            "proba+uncertainty+stage+time",
+            "uncertainty_only+stage",
+        ],
         default=None,
         help="覆盖 config.json 中 stacking.meta_features 的设置。"
-             "可选: proba_only, proba+uncertainty, proba+uncertainty+time"
+             "可选: proba_only, proba+uncertainty, proba+uncertainty+time,"
+             " proba+uncertainty+stage, proba+uncertainty+stage+time, uncertainty_only+stage"
     )
     return parser.parse_args()
 
@@ -162,6 +172,8 @@ def save_oof_cache(
     oof_cnn: np.ndarray,
     oof_gb: np.ndarray,
     oof_xgb: np.ndarray,
+    oof_gb_stage_meta: Optional[np.ndarray],
+    oof_xgb_stage_meta: Optional[np.ndarray],
     oof_true: np.ndarray,
     all_mts: np.ndarray,
     all_fps: np.ndarray,
@@ -188,6 +200,12 @@ def save_oof_cache(
         保存的文件路径
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    extra_arrays = {}
+    if oof_gb_stage_meta is not None:
+        extra_arrays["oof_gb_stage_meta"] = oof_gb_stage_meta
+    if oof_xgb_stage_meta is not None:
+        extra_arrays["oof_xgb_stage_meta"] = oof_xgb_stage_meta
+
     np.savez_compressed(
         path,
         # === OOF 概率矩阵 ===
@@ -210,6 +228,7 @@ def save_oof_cache(
         n_splits=np.array(config["training"].get("n_splits", 5)),
         num_classes=np.array(config["data"]["num_classes"]),
         created_at=np.array(datetime.now().isoformat()),
+        **extra_arrays,
     )
     file_size = os.path.getsize(path) / 1024
     logger.info(f"OOF 缓存已保存: {os.path.abspath(path)} ({file_size:.1f} KB)")
@@ -262,6 +281,12 @@ def load_oof_cache(path: str, config: dict, logger) -> dict:
     oof_cnn = data["oof_cnn"]
     oof_gb = data["oof_gb"]
     oof_xgb = data["oof_xgb"]
+    oof_gb_stage_meta = (
+        data["oof_gb_stage_meta"] if "oof_gb_stage_meta" in data.files else None
+    )
+    oof_xgb_stage_meta = (
+        data["oof_xgb_stage_meta"] if "oof_xgb_stage_meta" in data.files else None
+    )
     oof_true = data["oof_true"]
     N = len(oof_true)
 
@@ -278,6 +303,16 @@ def load_oof_cache(path: str, config: dict, logger) -> dict:
         if arr.shape != (N, expected_C):
             raise ValueError(
                 f"{name} 形状不匹配: 期望 ({N}, {expected_C}), 实际 {arr.shape}"
+            )
+    for name, arr in [
+        ("oof_gb_stage_meta", oof_gb_stage_meta),
+        ("oof_xgb_stage_meta", oof_xgb_stage_meta),
+    ]:
+        if arr is None:
+            continue
+        if arr.ndim != 2 or arr.shape[0] != N:
+            raise ValueError(
+                f"{name} 形状不匹配: 期望 ({N}, K), 实际 {arr.shape}"
             )
 
     created_at = str(data["created_at"])
@@ -304,6 +339,8 @@ def load_oof_cache(path: str, config: dict, logger) -> dict:
         "oof_cnn": oof_cnn,
         "oof_gb": oof_gb,
         "oof_xgb": oof_xgb,
+        "oof_gb_stage_meta": oof_gb_stage_meta,
+        "oof_xgb_stage_meta": oof_xgb_stage_meta,
         "oof_true": oof_true,
         "all_mts": data["all_mts"],
         "all_fps": data["all_fps"],
@@ -344,8 +381,12 @@ def apply_gradient_centralization(model: nn.Module) -> None:
             p.register_hook(_gc_hook)
 
 
-def smote_oversample(X: np.ndarray, y: np.ndarray,
-                     k: int = 5) -> tuple:
+def smote_oversample(
+    X: np.ndarray,
+    y: np.ndarray,
+    k: int = 5,
+    target_ratio: float = 1.0,
+) -> tuple:
     """在特征空间中对少数类执行 SMOTE 过采样。
 
     对每个少数类生成合成样本, 使所有类别数量与最多类持平。
@@ -355,18 +396,23 @@ def smote_oversample(X: np.ndarray, y: np.ndarray,
         X: (N, D) 特征矩阵
         y: (N,) 标签
         k: 近邻数
+        target_ratio: 目标少数类样本数相对多数类样本数的比例，1.0 表示补到完全平衡
 
     Returns:
         (X_resampled, y_resampled)
     """
     classes, counts = np.unique(y, return_counts=True)
     max_count = counts.max()
+    target_ratio = float(np.clip(target_ratio, 0.0, 1.0))
+    if target_ratio <= 0.0:
+        return X, y
+    target_count = max(1, int(np.ceil(max_count * target_ratio)))
 
     X_parts = [X]
     y_parts = [y]
 
     for cls, cnt in zip(classes, counts):
-        n_synthetic = max_count - cnt
+        n_synthetic = target_count - cnt
         if n_synthetic <= 0:
             continue
 
@@ -374,6 +420,13 @@ def smote_oversample(X: np.ndarray, y: np.ndarray,
         mask = y == cls
         X_cls = X[mask]
         n_cls = len(X_cls)
+
+        if n_cls <= 1:
+            duplicate_idx = np.random.randint(n_cls, size=n_synthetic)
+            synthetic = X_cls[duplicate_idx].copy()
+            X_parts.append(synthetic)
+            y_parts.append(np.full(n_synthetic, cls, dtype=y.dtype))
+            continue
 
         # 拟合近邻模型
         nn_model = NearestNeighbors(
@@ -383,6 +436,13 @@ def smote_oversample(X: np.ndarray, y: np.ndarray,
         nn_indices = nn_model.kneighbors(
             X_cls, return_distance=False
         )[:, 1:]  # 排除自身
+
+        if nn_indices.shape[1] == 0:
+            duplicate_idx = np.random.randint(n_cls, size=n_synthetic)
+            synthetic = X_cls[duplicate_idx].copy()
+            X_parts.append(synthetic)
+            y_parts.append(np.full(n_synthetic, cls, dtype=y.dtype))
+            continue
 
         # 生成合成样本
         synthetic = np.zeros((n_synthetic, X.shape[1]), dtype=X.dtype)
@@ -403,6 +463,200 @@ def smote_oversample(X: np.ndarray, y: np.ndarray,
         y_parts.append(np.full(n_synthetic, cls, dtype=y.dtype))
 
     return np.vstack(X_parts), np.concatenate(y_parts)
+
+
+def random_oversample(
+    X: np.ndarray,
+    y: np.ndarray,
+    target_ratio: float = 1.0,
+) -> tuple:
+    """Randomly duplicate minority samples until the requested ratio is reached."""
+    classes, counts = np.unique(y, return_counts=True)
+    max_count = counts.max()
+    target_ratio = float(np.clip(target_ratio, 0.0, 1.0))
+    if target_ratio <= 0.0:
+        return X, y
+    target_count = max(1, int(np.ceil(max_count * target_ratio)))
+
+    X_parts = [X]
+    y_parts = [y]
+    for cls, cnt in zip(classes, counts):
+        n_extra = target_count - cnt
+        if n_extra <= 0:
+            continue
+        X_cls = X[y == cls]
+        dup_idx = np.random.randint(len(X_cls), size=n_extra)
+        X_parts.append(X_cls[dup_idx].copy())
+        y_parts.append(np.full(n_extra, cls, dtype=y.dtype))
+    return np.vstack(X_parts), np.concatenate(y_parts)
+
+
+def _deep_update_dict(base: dict, override: dict) -> dict:
+    merged = copy.deepcopy(base)
+    for key, value in (override or {}).items():
+        if (
+            key in merged
+            and isinstance(merged[key], dict)
+            and isinstance(value, dict)
+        ):
+            merged[key] = _deep_update_dict(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _default_ml_hierarchical_config() -> dict:
+    return {
+        "stage1": {
+            "resampling": {
+                "strategy": "smote",
+                "target_ratio": 1.0,
+                "k_neighbors": 5,
+            },
+            "weighting": {
+                "mode": "effective_number",
+                "beta": 0.999,
+            },
+        },
+        "stage2": {
+            "resampling": {
+                "strategy": "none",
+                "target_ratio": 1.0,
+                "k_neighbors": 5,
+            },
+            "weighting": {
+                "mode": "none",
+                "beta": 0.999,
+            },
+        },
+        "stage_features": {
+            "enabled": True,
+            "include_positive_prob": True,
+        },
+    }
+
+
+def _get_ml_hierarchical_config(config: dict) -> dict:
+    training_cfg = dict(config.get("training", {}))
+    raw_cfg = training_cfg.get("ml_hierarchical", {})
+    if raw_cfg is None:
+        raw_cfg = {}
+    if not isinstance(raw_cfg, dict):
+        raise ValueError("training.ml_hierarchical must be a dict when provided")
+    return _deep_update_dict(_default_ml_hierarchical_config(), raw_cfg)
+
+
+def _resample_by_strategy(
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    strategy: str,
+    target_ratio: float,
+    k_neighbors: int,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    strategy = (strategy or "none").strip().lower()
+    diag = {
+        "strategy": strategy,
+        "before": int(len(y)),
+        "target_ratio": float(target_ratio),
+        "k_neighbors": int(k_neighbors),
+    }
+    if strategy == "none":
+        diag["after"] = int(len(y))
+        return X, y, diag
+    if strategy == "smote":
+        X_res, y_res = smote_oversample(
+            X, y, k=int(k_neighbors), target_ratio=float(target_ratio)
+        )
+    elif strategy in {"random_over", "random_oversample"}:
+        X_res, y_res = random_oversample(X, y, target_ratio=float(target_ratio))
+    else:
+        raise ValueError(f"unsupported resampling strategy: {strategy}")
+    diag["after"] = int(len(y_res))
+    return X_res, y_res, diag
+
+
+def _compute_class_weight_lookup(
+    y: np.ndarray,
+    *,
+    mode: str,
+    beta: float,
+) -> dict[int, float]:
+    mode = (mode or "none").strip().lower()
+    classes, counts = np.unique(y, return_counts=True)
+    if mode == "none":
+        return {int(cls): 1.0 for cls in classes}
+
+    raw_weights = {}
+    for cls, cnt in zip(classes, counts):
+        cnt = int(cnt)
+        if mode == "inverse_freq":
+            raw = 1.0 / max(cnt, 1)
+        elif mode == "effective_number":
+            beta_clamped = float(np.clip(beta, 0.0, 0.999999))
+            if beta_clamped <= 0.0:
+                raw = 1.0
+            else:
+                raw = (1.0 - beta_clamped) / max(
+                    1e-12, 1.0 - beta_clamped ** max(cnt, 1)
+                )
+        else:
+            raise ValueError(f"unsupported class weight mode: {mode}")
+        raw_weights[int(cls)] = float(raw)
+
+    sample_weights = np.asarray(
+        [raw_weights[int(label)] for label in y], dtype=np.float64
+    )
+    norm = float(sample_weights.mean()) if len(sample_weights) else 1.0
+    norm = norm if norm > 0 else 1.0
+    return {cls: weight / norm for cls, weight in raw_weights.items()}
+
+
+def _materialize_sample_weights(
+    y: np.ndarray,
+    *,
+    mode: str,
+    beta: float,
+    reference_y: np.ndarray,
+) -> tuple[Optional[np.ndarray], dict[int, float]]:
+    mode = (mode or "none").strip().lower()
+    lookup = _compute_class_weight_lookup(
+        np.asarray(reference_y, dtype=np.int64),
+        mode=mode,
+        beta=float(beta),
+    )
+    if mode == "none":
+        return None, lookup
+    sample_weights = np.asarray(
+        [lookup[int(label)] for label in np.asarray(y, dtype=np.int64)],
+        dtype=np.float64,
+    )
+    return sample_weights, lookup
+
+
+def _binary_stage_meta_features(
+    probs: np.ndarray,
+    *,
+    include_positive_prob: bool,
+) -> np.ndarray:
+    parts = []
+    if include_positive_prob:
+        parts.append(probs[:, 1:2].astype(np.float32))
+    parts.append(_meta_uncertainty_features(probs))
+    return np.hstack(parts).astype(np.float32)
+
+
+def _fit_ml_classifier(
+    clf,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    sample_weight: Optional[np.ndarray],
+):
+    if sample_weight is None:
+        clf.fit(X_train, y_train)
+    else:
+        clf.fit(X_train, y_train, sample_weight=sample_weight)
+    return clf
 
 
 def _build_ml_classifier(model_kind: str, seed: int, n_classes: int = 3):
@@ -501,14 +755,37 @@ def _train_hierarchical_ml_branch(
     X_val_s: np.ndarray,
     y_val: np.ndarray,
     seed: int,
+    config: dict,
     n_classes: int = 3,
     silt_idx: int = 2,
-) -> tuple[np.ndarray, float, dict]:
+) -> tuple[np.ndarray, float, dict, Optional[np.ndarray]]:
     """Train a two-stage hierarchical ML branch but keep a 3-class output API."""
+    b1_cfg = _get_ml_hierarchical_config(config)
+    stage_feature_cfg = b1_cfg["stage_features"]
     stage1_y = _stage1_labels(y_train, silt_idx=silt_idx)
-    X_stage1_sm, y_stage1_sm = smote_oversample(X_train_s, stage1_y, k=5)
+    stage1_cfg = b1_cfg["stage1"]
+    stage2_cfg = b1_cfg["stage2"]
+
+    X_stage1_train, y_stage1_train, stage1_resample_diag = _resample_by_strategy(
+        X_train_s,
+        stage1_y,
+        strategy=stage1_cfg["resampling"]["strategy"],
+        target_ratio=stage1_cfg["resampling"]["target_ratio"],
+        k_neighbors=stage1_cfg["resampling"]["k_neighbors"],
+    )
+    stage1_weight_reference = (
+        y_stage1_train
+        if stage1_cfg["resampling"]["strategy"] != "none"
+        else stage1_y
+    )
+    stage1_sample_weight, stage1_weight_lookup = _materialize_sample_weights(
+        y_stage1_train,
+        mode=stage1_cfg["weighting"]["mode"],
+        beta=stage1_cfg["weighting"]["beta"],
+        reference_y=stage1_weight_reference,
+    )
     stage1_clf = _build_ml_classifier(model_kind, seed, n_classes=2)
-    stage1_clf.fit(X_stage1_sm, y_stage1_sm)
+    _fit_ml_classifier(stage1_clf, X_stage1_train, y_stage1_train, stage1_sample_weight)
     stage1_proba = stage1_clf.predict_proba(X_val_s).astype(np.float64)
 
     X_stage2, y_stage2, non_silt_classes = _stage2_subset(
@@ -516,9 +793,26 @@ def _train_hierarchical_ml_branch(
     )
     if np.unique(y_stage2).size < 2:
         raise ValueError("stage2 training labels must contain both non-silt classes")
-    X_stage2_sm, y_stage2_sm = smote_oversample(X_stage2, y_stage2, k=5)
+    X_stage2_train, y_stage2_train, stage2_resample_diag = _resample_by_strategy(
+        X_stage2,
+        y_stage2,
+        strategy=stage2_cfg["resampling"]["strategy"],
+        target_ratio=stage2_cfg["resampling"]["target_ratio"],
+        k_neighbors=stage2_cfg["resampling"]["k_neighbors"],
+    )
+    stage2_weight_reference = (
+        y_stage2_train
+        if stage2_cfg["resampling"]["strategy"] != "none"
+        else y_stage2
+    )
+    stage2_sample_weight, stage2_weight_lookup = _materialize_sample_weights(
+        y_stage2_train,
+        mode=stage2_cfg["weighting"]["mode"],
+        beta=stage2_cfg["weighting"]["beta"],
+        reference_y=stage2_weight_reference,
+    )
     stage2_clf = _build_ml_classifier(model_kind, seed + 17, n_classes=2)
-    stage2_clf.fit(X_stage2_sm, y_stage2_sm)
+    _fit_ml_classifier(stage2_clf, X_stage2_train, y_stage2_train, stage2_sample_weight)
     stage2_proba = stage2_clf.predict_proba(X_val_s).astype(np.float64)
 
     probs = _compose_hierarchical_ml_proba(
@@ -529,17 +823,47 @@ def _train_hierarchical_ml_branch(
         silt_idx=silt_idx,
     )
     acc = accuracy_score(y_val, probs.argmax(axis=1))
+    stage_meta = None
+    if bool(stage_feature_cfg.get("enabled", True)):
+        stage1_meta = _binary_stage_meta_features(
+            stage1_proba,
+            include_positive_prob=bool(
+                stage_feature_cfg.get("include_positive_prob", True)
+            ),
+        )
+        stage2_meta = _binary_stage_meta_features(
+            stage2_proba,
+            include_positive_prob=bool(
+                stage_feature_cfg.get("include_positive_prob", True)
+            ),
+        )
+        stage_meta = np.hstack([stage1_meta, stage2_meta]).astype(np.float32)
     diagnostics = {
         "mode": "hierarchical",
-        "stage1_smote_before": int(len(stage1_y)),
-        "stage1_smote_after": int(len(y_stage1_sm)),
-        "stage2_smote_before": int(len(y_stage2)),
-        "stage2_smote_after": int(len(y_stage2_sm)),
+        "stage1_smote_before": int(stage1_resample_diag["before"]),
+        "stage1_smote_after": int(stage1_resample_diag["after"]),
+        "stage2_smote_before": int(stage2_resample_diag["before"]),
+        "stage2_smote_after": int(stage2_resample_diag["after"]),
+        "stage1_resample_strategy": str(stage1_resample_diag["strategy"]),
+        "stage2_resample_strategy": str(stage2_resample_diag["strategy"]),
+        "stage1_resample_ratio": float(stage1_resample_diag["target_ratio"]),
+        "stage2_resample_ratio": float(stage2_resample_diag["target_ratio"]),
+        "stage1_weight_mode": str(stage1_cfg["weighting"]["mode"]),
+        "stage2_weight_mode": str(stage2_cfg["weighting"]["mode"]),
+        "stage1_weight_lookup": {
+            str(k): float(v) for k, v in stage1_weight_lookup.items()
+        },
+        "stage2_weight_lookup": {
+            str(k): float(v) for k, v in stage2_weight_lookup.items()
+        },
         "stage1_silt_rate": float((stage1_proba[:, 1] >= 0.5).mean()),
+        "stage1_mean_entropy": float(_meta_uncertainty_features(stage1_proba)[:, 2].mean()),
+        "stage2_mean_entropy": float(_meta_uncertainty_features(stage2_proba)[:, 2].mean()),
         "stage2_negative_class": int(non_silt_classes[0]),
         "stage2_positive_class": int(non_silt_classes[1]),
+        "stage_features_enabled": bool(stage_feature_cfg.get("enabled", True)),
     }
-    return probs, float(acc), diagnostics
+    return probs, float(acc), diagnostics, stage_meta
 
 
 # =====================================================================
@@ -896,6 +1220,8 @@ def build_meta_features(
     oof_xgb: np.ndarray,
     measure_times: np.ndarray,
     mode: str,
+    oof_gb_stage_meta: Optional[np.ndarray] = None,
+    oof_xgb_stage_meta: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Build meta features for stacking.
 
@@ -904,28 +1230,51 @@ def build_meta_features(
       - "proba+uncertainty": add 3*3 uncertainty features -> (N, 18)
       - "proba+uncertainty+time": add log(measure_time) -> (N, 19)
       - "uncertainty_only": only use 3*3 uncertainty features -> (N, 9)
+      - "proba+uncertainty+stage": append GB/XGB staged meta features
+      - "proba+uncertainty+stage+time": staged meta + log(measure_time)
+      - "uncertainty_only+stage": uncertainty only + staged meta features
     """
     mode = (mode or "proba_only").strip().lower()
+    valid_modes = {
+        "proba_only",
+        "proba+uncertainty",
+        "proba+uncertainty+time",
+        "uncertainty_only",
+        "proba+uncertainty+stage",
+        "proba+uncertainty+stage+time",
+        "uncertainty_only+stage",
+    }
+    if mode not in valid_modes:
+        raise ValueError(f"unsupported meta feature mode: {mode}")
 
-    # 仅不确定性特征：不包含原始概率
-    if mode == "uncertainty_only":
-        parts = [
-            _meta_uncertainty_features(oof_cnn),
-            _meta_uncertainty_features(oof_gb),
-            _meta_uncertainty_features(oof_xgb),
-        ]
-        return np.hstack(parts).astype(np.float32)
+    include_time = mode.endswith("+time")
+    include_stage = "+stage" in mode
+    core_mode = mode
+    if include_time:
+        core_mode = core_mode[: -len("+time")]
+    if include_stage:
+        core_mode = core_mode.replace("+stage", "")
 
-    base = np.hstack([oof_cnn, oof_gb, oof_xgb]).astype(np.float32)
-    if mode == "proba_only":
-        return base
+    include_proba = core_mode != "uncertainty_only"
+    include_uncertainty = "uncertainty" in core_mode
 
-    parts = [base]
-    if "uncertainty" in mode:
+    parts = []
+    if include_proba:
+        parts.append(np.hstack([oof_cnn, oof_gb, oof_xgb]).astype(np.float32))
+    if include_uncertainty:
         parts.append(_meta_uncertainty_features(oof_cnn))
         parts.append(_meta_uncertainty_features(oof_gb))
         parts.append(_meta_uncertainty_features(oof_xgb))
-    if mode.endswith("+time"):
+    if include_stage:
+        if oof_gb_stage_meta is None or oof_xgb_stage_meta is None:
+            raise ValueError(
+                "meta_features requests staged GB/XGB uncertainty, but the current OOF cache "
+                "does not contain oof_gb_stage_meta / oof_xgb_stage_meta. "
+                "Please rerun Phase 1 with the enhanced B1 config."
+            )
+        parts.append(np.asarray(oof_gb_stage_meta, dtype=np.float32))
+        parts.append(np.asarray(oof_xgb_stage_meta, dtype=np.float32))
+    if include_time:
         mt = np.asarray(measure_times, dtype=np.float32)
         parts.append(np.log(np.maximum(mt, 1e-6)).reshape(-1, 1))
     return np.hstack(parts).astype(np.float32)
@@ -1106,6 +1455,8 @@ def run_phase2_stacking(
     oof_cnn: np.ndarray,
     oof_gb: np.ndarray,
     oof_xgb: np.ndarray,
+    oof_gb_stage_meta: Optional[np.ndarray],
+    oof_xgb_stage_meta: Optional[np.ndarray],
     oof_true: np.ndarray,
     fold_cnn_acc: list,
     fold_gb_acc: list,
@@ -1131,6 +1482,8 @@ def run_phase2_stacking(
         oof_xgb=oof_xgb,
         measure_times=all_mts,
         mode=str(meta_mode),
+        oof_gb_stage_meta=oof_gb_stage_meta,
+        oof_xgb_stage_meta=oof_xgb_stage_meta,
     )
     logger.info(f"  元特征模式: {meta_mode}")
     logger.info(f"  元特征维度: {meta_X.shape}")
@@ -1273,6 +1626,8 @@ def run_phase2_stacking_strategy(
     oof_cnn: np.ndarray,
     oof_gb: np.ndarray,
     oof_xgb: np.ndarray,
+    oof_gb_stage_meta: Optional[np.ndarray],
+    oof_xgb_stage_meta: Optional[np.ndarray],
     oof_true: np.ndarray,
     fold_cnn_acc: list,
     fold_gb_acc: list,
@@ -1297,6 +1652,8 @@ def run_phase2_stacking_strategy(
             oof_cnn=oof_cnn,
             oof_gb=oof_gb,
             oof_xgb=oof_xgb,
+            oof_gb_stage_meta=oof_gb_stage_meta,
+            oof_xgb_stage_meta=oof_xgb_stage_meta,
             oof_true=oof_true,
             fold_cnn_acc=fold_cnn_acc,
             fold_gb_acc=fold_gb_acc,
@@ -1323,6 +1680,8 @@ def run_phase2_stacking_strategy(
         oof_xgb=oof_xgb,
         measure_times=all_mts,
         mode=str(meta_mode),
+        oof_gb_stage_meta=oof_gb_stage_meta,
+        oof_xgb_stage_meta=oof_xgb_stage_meta,
     )
     logger.info(f"  元特征模式: {meta_mode}")
     logger.info(f"  元特征维度: {meta_X.shape}")
@@ -1520,6 +1879,11 @@ def main():
     )
 
     meta_mode = config.get("stacking", {}).get("meta_features", "proba_only")
+    if "+stage" in str(meta_mode).lower() and not ml_hierarchical_training:
+        raise ValueError(
+            "stacking.meta_features uses '+stage', but training.ml_hierarchical_training is false. "
+            "Enable B1 ML hierarchical training or switch back to a non-stage meta feature mode."
+        )
     oof_path = args.oof_path or _default_oof_path(config)
     save_oof = bool(args.save_oof or not args.phase2_only)
 
@@ -1531,6 +1895,16 @@ def main():
         oof_cnn = np.asarray(cached["oof_cnn"], dtype=np.float64)
         oof_gb = np.asarray(cached["oof_gb"], dtype=np.float64)
         oof_xgb = np.asarray(cached["oof_xgb"], dtype=np.float64)
+        oof_gb_stage_meta = (
+            np.asarray(cached["oof_gb_stage_meta"], dtype=np.float32)
+            if cached["oof_gb_stage_meta"] is not None
+            else None
+        )
+        oof_xgb_stage_meta = (
+            np.asarray(cached["oof_xgb_stage_meta"], dtype=np.float32)
+            if cached["oof_xgb_stage_meta"] is not None
+            else None
+        )
         oof_true = np.asarray(cached["oof_true"], dtype=np.int64)
         fold_cnn_acc = list(cached["fold_cnn_acc"])
         fold_gb_acc = list(cached["fold_gb_acc"])
@@ -1547,6 +1921,8 @@ def main():
         oof_cnn = np.zeros((N, C), dtype=np.float64)
         oof_gb = np.zeros((N, C), dtype=np.float64)
         oof_xgb = np.zeros((N, C), dtype=np.float64)
+        oof_gb_stage_meta = None
+        oof_xgb_stage_meta = None
         oof_true = np.zeros(N, dtype=np.int64)
         fold_cnn_acc = []
         fold_gb_acc = []
@@ -1654,25 +2030,30 @@ def main():
             X_train_s = scaler.fit_transform(X_train)
             X_val_s = scaler.transform(X_val)
             if ml_hierarchical_training:
-                gb_probs, gb_acc, gb_diag = _train_hierarchical_ml_branch(
+                gb_probs, gb_acc, gb_diag, gb_stage_meta = _train_hierarchical_ml_branch(
                     model_kind="gb",
                     X_train_s=X_train_s,
                     y_train=y_train,
                     X_val_s=X_val_s,
                     y_val=y_val,
                     seed=config["training"]["seed"],
+                    config=config,
                     n_classes=C,
                 )
                 logger.info(
-                    "  Stage1 SMOTE: %d -> %d, Stage2 SMOTE: %d -> %d",
+                    "  Stage1 %s: %d -> %d, Stage2 %s: %d -> %d",
+                    gb_diag["stage1_resample_strategy"],
                     gb_diag["stage1_smote_before"],
                     gb_diag["stage1_smote_after"],
+                    gb_diag["stage2_resample_strategy"],
                     gb_diag["stage2_smote_before"],
                     gb_diag["stage2_smote_after"],
                 )
                 logger.info(
-                    "  GB hierarchical: stage1_silt_rate = %.4f",
+                    "  GB hierarchical: stage1_silt_rate = %.4f, weights=(%s/%s)",
                     gb_diag["stage1_silt_rate"],
+                    gb_diag["stage1_weight_mode"],
+                    gb_diag["stage2_weight_mode"],
                 )
             else:
                 gb_probs, gb_acc, gb_diag = _train_flat_ml_branch(
@@ -1683,6 +2064,7 @@ def main():
                     y_val=y_val,
                     seed=config["training"]["seed"],
                 )
+                gb_stage_meta = None
                 logger.info(
                     f"  SMOTE: {gb_diag['smote_before']} -> {gb_diag['smote_after']} 样本"
                 )
@@ -1691,25 +2073,30 @@ def main():
 
             logger.info(f"--- XGBoost + SMOTE ({ml_mode_name}) ---")
             if ml_hierarchical_training:
-                xgb_probs, xgb_acc, xgb_diag = _train_hierarchical_ml_branch(
+                xgb_probs, xgb_acc, xgb_diag, xgb_stage_meta = _train_hierarchical_ml_branch(
                     model_kind="xgb",
                     X_train_s=X_train_s,
                     y_train=y_train,
                     X_val_s=X_val_s,
                     y_val=y_val,
                     seed=config["training"]["seed"],
+                    config=config,
                     n_classes=C,
                 )
                 logger.info(
-                    "  Stage1 SMOTE: %d -> %d, Stage2 SMOTE: %d -> %d",
+                    "  Stage1 %s: %d -> %d, Stage2 %s: %d -> %d",
+                    xgb_diag["stage1_resample_strategy"],
                     xgb_diag["stage1_smote_before"],
                     xgb_diag["stage1_smote_after"],
+                    xgb_diag["stage2_resample_strategy"],
                     xgb_diag["stage2_smote_before"],
                     xgb_diag["stage2_smote_after"],
                 )
                 logger.info(
-                    "  XGB hierarchical: stage1_silt_rate = %.4f",
+                    "  XGB hierarchical: stage1_silt_rate = %.4f, weights=(%s/%s)",
                     xgb_diag["stage1_silt_rate"],
+                    xgb_diag["stage1_weight_mode"],
+                    xgb_diag["stage2_weight_mode"],
                 )
             else:
                 xgb_probs, xgb_acc, xgb_diag = _train_flat_ml_branch(
@@ -1720,6 +2107,7 @@ def main():
                     y_val=y_val,
                     seed=config["training"]["seed"],
                 )
+                xgb_stage_meta = None
                 logger.info(
                     f"  SMOTE: {xgb_diag['smote_before']} -> {xgb_diag['smote_after']} 样本"
                 )
@@ -1729,6 +2117,14 @@ def main():
             oof_cnn[val_idx] = cnn_probs
             oof_gb[val_idx] = gb_probs
             oof_xgb[val_idx] = xgb_probs
+            if gb_stage_meta is not None:
+                if oof_gb_stage_meta is None:
+                    oof_gb_stage_meta = np.zeros((N, gb_stage_meta.shape[1]), dtype=np.float32)
+                oof_gb_stage_meta[val_idx] = gb_stage_meta
+            if xgb_stage_meta is not None:
+                if oof_xgb_stage_meta is None:
+                    oof_xgb_stage_meta = np.zeros((N, xgb_stage_meta.shape[1]), dtype=np.float32)
+                oof_xgb_stage_meta[val_idx] = xgb_stage_meta
             oof_true[val_idx] = true_labels
 
             fixed_probs = 0.5 * cnn_probs + 0.25 * gb_probs + 0.25 * xgb_probs
@@ -1747,6 +2143,12 @@ def main():
             cnn_finite = np.isfinite(oof_cnn).all()
             gb_finite = np.isfinite(oof_gb).all()
             xgb_finite = np.isfinite(oof_xgb).all()
+            gb_stage_finite = (
+                True if oof_gb_stage_meta is None else np.isfinite(oof_gb_stage_meta).all()
+            )
+            xgb_stage_finite = (
+                True if oof_xgb_stage_meta is None else np.isfinite(oof_xgb_stage_meta).all()
+            )
             
             if not cnn_finite:
                 logger.error(
@@ -1762,11 +2164,18 @@ def main():
             
             logger.info(f"  OOF finite 检查通过: CNN={cnn_finite}, GB={gb_finite}, XGB={xgb_finite}")
             
+            if not gb_stage_finite or not xgb_stage_finite:
+                raise ValueError(
+                    "staged GB/XGB meta features contain non-finite values; refusing to save cache."
+                )
+
             save_oof_cache(
                 path=oof_path,
                 oof_cnn=oof_cnn,
                 oof_gb=oof_gb,
                 oof_xgb=oof_xgb,
+                oof_gb_stage_meta=oof_gb_stage_meta,
+                oof_xgb_stage_meta=oof_xgb_stage_meta,
                 oof_true=oof_true,
                 all_mts=all_mts,
                 all_fps=all_fps,
@@ -1791,6 +2200,8 @@ def main():
         oof_cnn=oof_cnn,
         oof_gb=oof_gb,
         oof_xgb=oof_xgb,
+        oof_gb_stage_meta=oof_gb_stage_meta,
+        oof_xgb_stage_meta=oof_xgb_stage_meta,
         oof_true=oof_true,
         fold_cnn_acc=fold_cnn_acc,
         fold_gb_acc=fold_gb_acc,
