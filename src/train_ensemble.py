@@ -370,6 +370,8 @@ def apply_gradient_centralization(model: nn.Module) -> None:
     钩子在 loss.backward() 时自动触发, 无需修改训练循环。
     """
     def _gc_hook(grad):
+        if grad is None:
+            return None
         if len(grad.shape) > 1:
             return grad - grad.mean(
                 dim=tuple(range(1, len(grad.shape))), keepdim=True
