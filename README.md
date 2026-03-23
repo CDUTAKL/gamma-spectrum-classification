@@ -9,9 +9,50 @@
 当前工程已经演进为：
 
 - TriBranch CNN + GradientBoosting + XGBoost 集成
-- Phase 2 stacking
+- Phase 2 stacking / hierarchical stacking
 - 方案 A：`hierarchical + threshold`
-- 方案 B1：仅 ML 分支做层级训练
+- 方案 B1：仅 ML 分支做层级训练的验证线
+
+## Current Project Stage
+
+This project is no longer in the “build a working baseline” stage. It is now in a high-platform refinement stage focused on the hardest class, `粉土`.
+
+The current consensus is:
+
+- `flat baseline` remains the best historical anchor for `Acc`
+- `hierarchical + threshold + 0.43` is the current mature mainline for `粉土 F1 / Macro-F1`
+- B1 has been implemented and fairly tested, but it did **not** stably beat Scheme A
+- If future exploration continues, B2 is more promising than further polishing B1
+
+In other words:
+
+- `flat baseline` is the accuracy-oriented reference line
+- `Scheme A` is the current production/research mainline
+- `B1` is a completed validation branch, not the new default mainline
+
+## Project Evolution Summary
+
+The project has evolved through the following stages:
+
+1. Build a stable flat baseline with TriBranch CNN + GB + XGB + OOF + stacking
+2. Identify the real bottleneck: `粉土` is the hardest class, not the overall pipeline
+3. Introduce hierarchical stacking and start Scheme A
+4. Add Stage 1 thresholding and sweep `silt_threshold`
+5. Converge Scheme A to `hierarchical + threshold + 0.43`
+6. Push hierarchical training into the ML branch and create B1
+7. Strengthen B1 with stage-wise resampling, staged meta features, and class-balanced weighting
+8. Conclude that B1 still does not outperform Scheme A
+9. Improve engineering reliability: config overlays, artifact summaries, cross-platform sample weights
+10. Hold Scheme A as the current mainline and treat B2/B3 as future directions
+
+Important code/history anchors:
+
+- `f807ae7`: best round2 flat baseline anchor
+- `78a1e6d`: hierarchical stacking introduced
+- `cb484a4`: Stage 1 threshold introduced
+- `f1f2b5b`: strengthened B1 line
+
+For a more detailed internal handoff, see [CODEX_HANDOFF.md](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/CODEX_HANDOFF.md).
 
 ## Project Layout
 
@@ -67,30 +108,30 @@ Or edit `train_dir`, `val_dir`, `batch_size`, and `num_workers` directly in the 
 
 ## Current Experiment Lines
 
-- `flat baseline`: best for `Acc`
-- `hierarchical + threshold`: best for `粉土 F1 / Macro-F1`
-- Current local/B1 enhanced line:
-  - `training.ml_hierarchical_training = true`
-  - `training.ml_hierarchical.stage1.resampling.strategy = smote`
-  - `training.ml_hierarchical.stage1.resampling.target_ratio = 0.9`
-  - `training.ml_hierarchical.stage1.weighting.mode = effective_number`
-  - `training.ml_hierarchical.stage2.resampling.strategy = none`
-  - `training.ml_hierarchical.stage_features.enabled = true`
-  - `stacking.meta_features = proba+uncertainty+stage`
-  - `stacking.strategy = hierarchical`
-  - `stacking.stage1_decision = threshold`
-  - `stacking.silt_threshold = 0.43`
+- `flat baseline`
+  - role: accuracy-oriented historical reference
+  - best-known full-run anchor is the line around `f807ae7`
+
+- `Scheme A = hierarchical + threshold`
+  - role: current mature mainline
+  - preferred when the goal is `粉土 F1 / Macro-F1`
+  - stable working point: `silt_threshold = 0.43`
+
+- `B1 = ML hierarchical training`
+  - role: completed validation branch
+  - result: did not stably outperform Scheme A
+  - keep for research traceability, but do not treat as current default
 
 ## B1 Advanced Config
 
-If you are preparing B1.1 / B1.2 / B1.3 experiments, keep the new knobs in experiment overlays instead of editing the core training code. The current rule of thumb is:
+If you need to rerun or revisit B1 / B1.1 / B1.2 / B1.3, keep the knobs in experiment overlays instead of editing the core training code. The current rule of thumb is:
 
 - knobs that change Phase 1 outputs or OOF cache behavior should go under `training`
 - knobs that only affect final Phase 2 decision can stay under `stacking`
 
 The implemented field names are documented in [configs/b1_advanced_config.md](/E:/py_project/Gamma%20Energy%20Spectrum%20Label%20Classification%20Prediction/configs/b1_advanced_config.md).
 
-Minimal current B1 overlay example:
+Minimal B1 overlay example:
 
 ```json
 {
