@@ -73,15 +73,22 @@ def _get_composition_aux_config(config: dict) -> dict:
 def _build_composition_target_table(config: dict, device: torch.device) -> torch.Tensor:
     comp_cfg = config["training"]["composition_aux"]
     target_cfg = comp_cfg["targets"]
-    table = torch.tensor(
-        [
-            target_cfg["clay"],
-            target_cfg["sand"],
-            target_cfg["silt"],
-        ],
-        dtype=torch.float32,
-        device=device,
-    )
+    class_names = config.get("data", {}).get("class_names", ["粘土", "砂土", "粉土"])
+    key_aliases = {
+        "粘土": "clay",
+        "砂土": "sand",
+        "粉土": "silt",
+        "clay": "clay",
+        "sand": "sand",
+        "silt": "silt",
+    }
+    rows = []
+    for class_name in class_names:
+        target_key = key_aliases.get(class_name)
+        if target_key is None:
+            raise KeyError(f"unsupported class name for composition target mapping: {class_name}")
+        rows.append(target_cfg[target_key])
+    table = torch.tensor(rows, dtype=torch.float32, device=device)
     return table
 
 
