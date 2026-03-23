@@ -1,10 +1,12 @@
 import os
+import inspect
 
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.metrics import confusion_matrix, f1_score
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -48,24 +50,65 @@ def evaluate_epoch(
     criterion: nn.Module,
     device: torch.device,
     class_names: list = None,
+    config: dict = None,
 ) -> dict:
     model.eval()
     all_preds = []
     all_labels = []
     total_loss = 0.0
     non_blocking = device.type == "cuda"
+    comp_cfg = config.get("training", {}).get("composition_aux", {}) if config else {}
+    use_comp_aux = bool(comp_cfg.get("enabled", False))
+    total_comp_entropy = 0.0
+    total_cls_comp_gap = 0.0
+    total_silt_comp = 0.0
+    total_samples = 0
+    total_silt_samples = 0
 
     with torch.inference_mode():
         for data, window_features, labels in val_loader:
             data = data.to(device, non_blocking=non_blocking)
             window_features = window_features.to(device, non_blocking=non_blocking)
             labels = labels.to(device, non_blocking=non_blocking)
-            logits = model(data, window_features)
+            if use_comp_aux:
+                try:
+                    params = inspect.signature(model.forward).parameters
+                except (TypeError, ValueError):
+                    params = {}
+                if "return_aux" in params:
+                    model_out = model(data, window_features, return_aux=True)
+                else:
+                    model_out = model(data, window_features)
+            else:
+                model_out = model(data, window_features)
+
+            if isinstance(model_out, dict):
+                logits = model_out["logits_cls"]
+                prob_cls = model_out.get("prob_cls", F.softmax(logits, dim=1))
+                comp_pred = model_out.get("comp_pred")
+            else:
+                logits = model_out
+                prob_cls = F.softmax(logits, dim=1)
+                comp_pred = None
+
             loss = criterion(logits, labels)
             total_loss += loss.item()
             preds = logits.argmax(dim=1)
             all_preds.extend(preds.cpu().numpy().tolist())
             all_labels.extend(labels.cpu().numpy().tolist())
+
+            if comp_pred is not None:
+                comp_safe = comp_pred.clamp_min(1e-8)
+                entropy = -(comp_safe * comp_safe.log()).sum(dim=1)
+                cls_comp_gap = torch.abs(prob_cls - comp_pred).mean(dim=1)
+                total_comp_entropy += float(entropy.sum().item())
+                total_cls_comp_gap += float(cls_comp_gap.sum().item())
+                total_samples += labels.size(0)
+
+                silt_mask = labels == 2
+                if silt_mask.any():
+                    total_silt_comp += float(comp_pred[silt_mask, 2].sum().item())
+                    total_silt_samples += int(silt_mask.sum().item())
 
     all_preds = np.array(all_preds)
     all_labels = np.array(all_labels)
@@ -92,6 +135,15 @@ def evaluate_epoch(
         "per_class_f1": per_class_f1,
         "confusion_matrix": cm,
         "class_names": class_names,
+        "mean_comp_entropy": (
+            total_comp_entropy / total_samples if total_samples > 0 else None
+        ),
+        "mean_cls_comp_gap": (
+            total_cls_comp_gap / total_samples if total_samples > 0 else None
+        ),
+        "silt_comp_mean": (
+            total_silt_comp / total_silt_samples if total_silt_samples > 0 else None
+        ),
     }
 
 
@@ -136,6 +188,12 @@ def log_to_tensorboard(
     writer.add_scalar("Accuracy/val", metrics["accuracy"], epoch)
     writer.add_scalar("F1/macro", metrics["macro_f1"], epoch)
     writer.add_scalar("F1/weighted", metrics["weighted_f1"], epoch)
+    if metrics.get("mean_comp_entropy") is not None:
+        writer.add_scalar("Aux/mean_comp_entropy", metrics["mean_comp_entropy"], epoch)
+    if metrics.get("mean_cls_comp_gap") is not None:
+        writer.add_scalar("Aux/mean_cls_comp_gap", metrics["mean_cls_comp_gap"], epoch)
+    if metrics.get("silt_comp_mean") is not None:
+        writer.add_scalar("Aux/silt_comp_mean", metrics["silt_comp_mean"], epoch)
     for i, name in enumerate(class_names):
         writer.add_scalar(f"F1_per_class/{name}", float(metrics["per_class_f1"][i]), epoch)
 

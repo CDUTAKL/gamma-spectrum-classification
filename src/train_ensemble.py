@@ -1047,7 +1047,7 @@ def train_cnn_model(config, train_ds, val_ds, device, logger, tag, seed):
         # 训练一个 epoch (传入 scaler 启用 AMP)
         train_one_epoch(
             model, train_loader, optimizer, criterion, device,
-            epoch=epoch, mixup_alpha=mixup_alpha, scaler=scaler,
+            epoch=epoch, mixup_alpha=mixup_alpha, scaler=scaler, config=config,
         )
 
         scheduler.step()
@@ -1068,6 +1068,7 @@ def train_cnn_model(config, train_ds, val_ds, device, logger, tag, seed):
             val_criterion,
             device,
             class_names=config.get("data", {}).get("class_names"),
+            config=config,
         )
         val_acc = val_metrics["accuracy"]
         
@@ -1144,7 +1145,10 @@ def predict_cnn_tta(models, dataset, device,
             batch_logits = None
             for m in models:
                 with torch.inference_mode():
-                    out = m(data, wf).cpu()
+                    out = m(data, wf)
+                    if isinstance(out, dict):
+                        out = out["logits_cls"]
+                    out = out.cpu()
                 if batch_logits is None:
                     batch_logits = out
                 else:

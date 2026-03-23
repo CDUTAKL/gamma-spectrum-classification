@@ -101,7 +101,31 @@
         "swa_start_epoch": 0.75,
         "use_compile": true,
         "use_amp": false,
-        "val_interval": 1
+        "val_interval": 1,
+        "composition_aux": {
+            "enabled": false,
+            "warmup_epochs": 5,
+            "lambda_reg": 0.2,
+            "lambda_cons": 0.1,
+            "loss": "kl",
+            "targets": {
+                "clay": [
+                    0.8,
+                    0.05,
+                    0.15
+                ],
+                "sand": [
+                    0.05,
+                    0.8,
+                    0.15
+                ],
+                "silt": [
+                    0.2,
+                    0.2,
+                    0.6
+                ]
+            }
+        }
     },
     "stacking": {
         "meta_features": "proba+uncertainty",

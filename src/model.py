@@ -3,6 +3,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _remap_legacy_classifier_state_dict(
+    state_dict: dict,
+    backbone_len: int,
+) -> dict:
+    remapped = dict(state_dict)
+    head_prefix = f"classifier.{backbone_len}."
+    for key in list(remapped.keys()):
+        if key.startswith(head_prefix):
+            remapped[key.replace(head_prefix, "classifier_head.", 1)] = remapped.pop(key)
+        elif key.startswith("classifier."):
+            remapped[key.replace("classifier.", "fusion_backbone.", 1)] = remapped.pop(key)
+
+    if "composition_head.weight" not in remapped and "classifier_head.weight" in remapped:
+        remapped["composition_head.weight"] = remapped["classifier_head.weight"].clone()
+    if "composition_head.bias" not in remapped and "classifier_head.bias" in remapped:
+        remapped["composition_head.bias"] = remapped["classifier_head.bias"].clone()
+    return remapped
+
+
 class SEBlock(nn.Module):
     """Squeeze-and-Excitation 通道注意力模块。"""
     def __init__(self, channels: int, reduction: int = 4):
@@ -172,9 +191,13 @@ class DualBranchSEModel(nn.Module):
             ])
             in_dim = out_dim
         fc_layers.append(nn.Linear(in_dim, num_classes))
-        self.classifier = nn.Sequential(*fc_layers)
+        self.fusion_backbone = nn.Sequential(*fc_layers[:-1]) if len(fc_layers) > 1 else nn.Identity()
+        self.classifier_head = fc_layers[-1]
+        self.composition_head = nn.Linear(in_dim, num_classes)
 
-    def forward(self, spectrum: torch.Tensor, window_features: torch.Tensor) -> torch.Tensor:
+    def _forward_shared_features(
+        self, spectrum: torch.Tensor, window_features: torch.Tensor
+    ) -> torch.Tensor:
         x = self.conv_layers(spectrum)
         x_avg = self.global_avg_pool(x).squeeze(-1)
         x_max = self.global_max_pool(x).squeeze(-1)
@@ -183,8 +206,37 @@ class DualBranchSEModel(nn.Module):
         w = self.window_mlp(window_features)
 
         fused = torch.cat([x, w], dim=1)
-        logits = self.classifier(fused)
-        return logits
+        return self.fusion_backbone(fused)
+
+    def _build_output_dict(self, shared_features: torch.Tensor) -> dict:
+        logits_cls = self.classifier_head(shared_features)
+        logits_reg = self.composition_head(shared_features)
+        prob_cls = F.softmax(logits_cls, dim=1)
+        comp_pred = F.softmax(logits_reg, dim=1)
+        return {
+            "logits_cls": logits_cls,
+            "prob_cls": prob_cls,
+            "logits_reg": logits_reg,
+            "comp_pred": comp_pred,
+        }
+
+    def forward(
+        self,
+        spectrum: torch.Tensor,
+        window_features: torch.Tensor,
+        return_aux: bool = False,
+    ) -> torch.Tensor:
+        shared_features = self._forward_shared_features(spectrum, window_features)
+        outputs = self._build_output_dict(shared_features)
+        if return_aux:
+            return outputs
+        return outputs["logits_cls"]
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        remapped = _remap_legacy_classifier_state_dict(
+            state_dict, backbone_len=len(self.fusion_backbone)
+        )
+        return super().load_state_dict(remapped, strict=strict)
 
     def get_num_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -395,16 +447,20 @@ class TriBranchModel(nn.Module):
             ])
             in_dim = out_dim
         fc_layers.append(nn.Linear(in_dim, num_classes))
-        self.classifier = nn.Sequential(*fc_layers)
+        self.fusion_backbone = nn.Sequential(*fc_layers[:-1]) if len(fc_layers) > 1 else nn.Identity()
+        self.classifier_head = fc_layers[-1]
+        self.composition_head = nn.Linear(in_dim, num_classes)
 
-    def forward(self, spectrum: torch.Tensor,
-                window_features: torch.Tensor) -> torch.Tensor:
+    def _forward_shared_features(
+        self, spectrum: torch.Tensor,
+        window_features: torch.Tensor
+    ) -> torch.Tensor:
         """
         Args:
             spectrum:        (B, 3, 820) 多通道光谱 [CPS, 一阶导, 二阶导]
             window_features: (B, 34)     能窗工程特征
         Returns:
-            (B, num_classes) logits
+            (B, hidden_dim) shared features
         """
         # 分支1: CNN - 局部多尺度峰特征
         x = self.cnn_branch(spectrum)
@@ -423,8 +479,37 @@ class TriBranchModel(nn.Module):
 
         # 三分支融合 -> 分类
         fused = torch.cat([x_cnn, x_trans, x_mlp], dim=1)
-        logits = self.classifier(fused)
-        return logits
+        return self.fusion_backbone(fused)
+
+    def _build_output_dict(self, shared_features: torch.Tensor) -> dict:
+        logits_cls = self.classifier_head(shared_features)
+        logits_reg = self.composition_head(shared_features)
+        prob_cls = F.softmax(logits_cls, dim=1)
+        comp_pred = F.softmax(logits_reg, dim=1)
+        return {
+            "logits_cls": logits_cls,
+            "prob_cls": prob_cls,
+            "logits_reg": logits_reg,
+            "comp_pred": comp_pred,
+        }
+
+    def forward(
+        self,
+        spectrum: torch.Tensor,
+        window_features: torch.Tensor,
+        return_aux: bool = False,
+    ) -> torch.Tensor:
+        shared_features = self._forward_shared_features(spectrum, window_features)
+        outputs = self._build_output_dict(shared_features)
+        if return_aux:
+            return outputs
+        return outputs["logits_cls"]
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        remapped = _remap_legacy_classifier_state_dict(
+            state_dict, backbone_len=len(self.fusion_backbone)
+        )
+        return super().load_state_dict(remapped, strict=strict)
 
     def get_num_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
